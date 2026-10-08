@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DevriX QA Audit</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header class="bar">
+  <div class="bar-in">
+    <span class="mark" aria-hidden="true">QA</span>
+    <div><strong>QA Audit</strong><span class="sub">Crawl-based WordPress audit · DevriX house report</span></div>
+  </div>
+</header>
+
+<main class="layout">
+  <form id="f" class="panel form" novalidate>
+    <div class="ph">
+      <h1>New audit</h1>
+      <div class="profile-row">
+        <label for="profile" class="sr">Profile</label>
+        <select id="profile"><option value="">Load a saved profile…</option></select>
+        <button type="button" id="saveProfile" class="ghost">Save profile</button>
+        <button type="button" id="delProfile" class="ghost danger" hidden>Delete</button>
+      </div>
+    </div>
+
+    <fieldset>
+      <legend>Site</legend>
+      <div class="field"><label for="url">Site URL</label><input id="url" name="url" type="url" placeholder="https://example.com" required autocomplete="url"></div>
+      <div class="row2">
+        <div class="field"><label for="siteName">Report name</label><input id="siteName" name="siteName" placeholder="Client name"></div>
+        <div class="field"><label for="environment">Environment</label><select id="environment" name="environment"><option value="production">Production</option><option value="staging">Staging</option></select></div>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Brand rules</legend>
+      <p class="hint">Copy these from the brand guide or Figma. Leave empty to skip design checks (they'll show as unverifiable).</p>
+      <div class="row2">
+        <div class="field"><label for="headingFonts">Heading fonts</label><input id="headingFonts" name="brand.headingFonts" placeholder="Bitter"></div>
+        <div class="field"><label for="bodyFonts">Body fonts</label><input id="bodyFonts" name="brand.bodyFonts" placeholder="Poppins"></div>
+      </div>
+      <div class="field"><label for="colors">Brand colours <span class="opt">hex, comma-separated</span></label><textarea id="colors" name="brand.colors" rows="2" placeholder="#A6263F, #4D4C4C, #0D0D0D, #FFFFFF"></textarea><div id="swatches" class="swatches" aria-live="polite"></div></div>
+      <div class="row2">
+        <div class="field"><label for="designUrl">Design link <span class="opt">optional</span></label><input id="designUrl" name="brand.designUrl" type="url" placeholder="https://www.figma.com/design/…"></div>
+        <div class="field"><label for="designLabel">Design label</label><input id="designLabel" name="brand.designLabel" placeholder="Brand 1-Pager"></div>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Content rules</legend>
+      <div class="field"><label for="phones">Approved phone numbers <span class="opt">one per line</span></label><textarea id="phones" name="phones.expected" rows="2" placeholder="800-727-8990"></textarea><p class="hint">Any other number found in the page HTML is reported. Leave empty to list the numbers in use instead.</p></div>
+      <div class="field"><label for="legacy">Legacy redirects <span class="opt">old -&gt; new, one per line</span></label><textarea id="legacy" name="legacyRedirects" rows="2" placeholder="/old-page/ -> /new-page/"></textarea></div>
+    </fieldset>
+
+    <details class="adv">
+      <summary>Crawl and budget settings</summary>
+      <div class="grid3">
+        <div class="field"><label for="maxPages">Max URLs</label><input id="maxPages" name="maxPages" type="number" min="1" value="500"></div>
+        <div class="field"><label for="renderSample">Pages to render</label><input id="renderSample" name="renderSample" type="number" min="1" value="30"></div>
+        <div class="field"><label for="concurrency">Parallel requests</label><input id="concurrency" name="concurrency" type="number" min="1" max="12" value="4"></div>
+        <div class="field"><label for="perfRuns">Perf runs</label><input id="perfRuns" name="perfRuns" type="number" min="1" max="10" value="3"></div>
+        <div class="field"><label for="perfPages">Perf pages</label><input id="perfPages" name="perfPages" type="number" min="1" max="10" value="3"></div>
+        <div class="field"><label for="colorTolerance">Colour tolerance</label><input id="colorTolerance" name="brand.colorTolerance" type="number" min="0" max="60" value="8"></div>
+        <div class="field"><label for="ttfb">TTFB budget (ms)</label><input id="ttfb" name="budgets.ttfbMs" type="number" value="400"></div>
+        <div class="field"><label for="lcp">LCP budget (ms)</label><input id="lcp" name="budgets.lcpMs" type="number" value="2500"></div>
+        <div class="field"><label for="inlineKB">Inline CSS/JS (KB)</label><input id="inlineKB" name="budgets.inlineKB" type="number" value="100"></div>
+      </div>
+      <label class="check"><input type="checkbox" id="ext" name="checkExternalLinks"> Check external links (slower; many sites block bots)</label>
+      <div class="field"><label for="ignore">Ignore selectors <span class="opt">third-party widgets, one per line</span></label><textarea id="ignore" name="ignoreSelectors" rows="2" placeholder=".chat-widget"></textarea></div>
+    </details>
+
+    <div class="actions">
+      <p id="formErr" class="err" role="alert" hidden></p>
+      <button type="submit" id="go" class="primary">Run audit</button>
+    </div>
+  </form>
+
+  <section class="panel activity" aria-labelledby="actH">
+    <div class="ph"><h2 id="actH">Audits</h2><span id="count" class="muted"></span></div>
+    <div id="live" hidden></div>
+    <ul id="history" class="history"></ul>
+    <p id="empty" class="muted empty" hidden>No audits yet. Enter a site URL and run your first audit. A typical 250-page WordPress site takes 5–10 minutes.</p>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

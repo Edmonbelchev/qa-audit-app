@@ -1,0 +1,22 @@
+{
+  "A&J Property Restoration": {
+    "url": "https://ajrestores.com",
+    "siteName": "A&J Property Restoration",
+    "environment": "production",
+    "brand": {
+      "headingFonts": "Bitter",
+      "bodyFonts": "Poppins",
+      "colors": "#A6263F, #4D4C4C, #0D0D0D, #FFFFFF, #FFC800, #EFEFEF",
+      "colorTolerance": 8,
+      "designUrl": "https://www.figma.com/design/B1wghC6vYUlNkUPp88d6Hn/A-J---Brand-1-Pager?node-id=0-3",
+      "designLabel": "A&J Brand 1-Pager (Figma)"
+    },
+    "phones": { "expected": "800-727-8990" },
+    "legacyRedirects": "/restoration-services/ -> /services/reconstruction-services/\n/restoration-services/flood-damage-cleanup/ -> /services/flood-damage-cleanup/",
+    "maxPages": 500,
+    "renderSample": 30,
+    "perfRuns": 3,
+    "perfPages": 3,
+    "ignoreSelectors": ""
+  }
+}
