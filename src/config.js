@@ -11,6 +11,8 @@ const DEFAULTS = {
   viewports: { desktop: 1280, mobile: 375 },
   perfRuns: 3,
   perfPages: 3, // homepage + N-1 other key pages
+  maxScreenshots: 48, // evidence screenshots per report (all issues)
+  shotsPerIssue: 8, // slides per issue
   checkExternalLinks: false,
   externalLinkCap: 300,
   brand: {
@@ -60,7 +62,7 @@ function build(input = {}) {
   }
   c.siteName = String(input.siteName || '').trim() || (c.host || '').replace(/^www\./, '');
   if (input.environment) c.environment = input.environment === 'staging' ? 'staging' : 'production';
-  for (const k of ['maxPages', 'maxDepth', 'concurrency', 'renderSample', 'perfRuns', 'perfPages', 'externalLinkCap']) {
+  for (const k of ['maxPages', 'maxDepth', 'concurrency', 'renderSample', 'perfRuns', 'perfPages', 'externalLinkCap', 'maxScreenshots', 'shotsPerIssue']) {
     if (input[k] !== undefined && input[k] !== '') {
       const n = parseInt(input[k], 10);
       if (Number.isFinite(n) && n >= 0) c[k] = n;

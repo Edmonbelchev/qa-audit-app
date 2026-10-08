@@ -9,6 +9,7 @@ const { build } = require('./src/config');
 const { runAudit } = require('./src/audit');
 const { createStorage } = require('./src/storage');
 const shares = require('./src/shares');
+const { loadProfile } = require('./src/wp-profile');
 
 const PORT = +process.env.PORT || 4317;
 const ON_VERCEL = !!process.env.VERCEL;
@@ -20,7 +21,7 @@ const store = createStorage(process.env, { root: ON_VERCEL ? path.join('/tmp', '
 // Serverless (Vercel, or QA_STEP_SECONDS set): each invocation runs one time-boxed step, saves a checkpoint
 // (audits/<id>/state.json) and calls /api/audits/<id>/continue to start the next step in a fresh invocation.
 const STEP_MS = process.env.QA_STEP_SECONDS ? +process.env.QA_STEP_SECONDS * 1000 : ON_VERCEL ? 240000 : 0;
-const LEASE_MS = STEP_MS + 60000;
+const LEASE_MS = STEP_MS + (+process.env.QA_LEASE_GRACE_SECONDS || 60) * 1000;
 const jobs = new Map(); // id -> live state in this instance
 const queue = [];
 let running = null;
@@ -40,7 +41,20 @@ const readBody = (req) => new Promise((ok, no) => {
   let b = ''; req.on('data', (c) => { b += c; if (b.length > 1e6) req.destroy(); }); req.on('end', () => { try { ok(b ? JSON.parse(b) : {}); } catch (e) { no(e); } });
 });
 const publicJob = (j) => ({ id: j.id, status: j.status, stage: j.stage, progress: j.progress, log: j.log.slice(-60), error: j.error, summary: j.summary, position: queue.indexOf(j.id) });
-const isStalled = (m) => m.status === 'running' && !jobs.has(m.id) && !!m.checkpoint && (m.leaseUntil || 0) < Date.now();
+// Stalled = should be running but no step holds its lease (a hand-off failed or a step was killed).
+const isStalled = (m) => (m.status === 'running' || m.status === 'queued') && !jobs.has(m.id) && !queue.includes(m.id) && (m.leaseUntil || 0) < Date.now();
+const MAX_RESTARTS = 4;
+const kicked = new Map(); // id -> last kick time (this instance)
+// Restart stalled audits automatically. Called whenever the app is polled, and by the optional cron route.
+function kickStalled(metas) {
+  for (const m of metas) {
+    if (!isStalled(m)) continue;
+    if (Date.now() - (kicked.get(m.id) || 0) < 20000) continue;
+    kicked.set(m.id, Date.now());
+    if (STEP_MS) background(runStep(m.id, { restart: true }));
+    else { queue.push(m.id); scheduleNext(); }
+  }
+}
 
 async function listAudits(limit = 200) {
   const keys = (await store.list('audits/')).filter((k) => k.endsWith('/meta.json')).sort().reverse().slice(0, limit);
@@ -72,27 +86,43 @@ function selfBase() {
 async function chain(id, token) {
   const headers = { 'x-qa-run-token': token };
   if (process.env.VERCEL_AUTOMATION_BYPASS_SECRET) headers['x-vercel-protection-bypass'] = process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 5; i++) {
     try {
       const r = await fetch(`${selfBase()}/api/audits/${id}/continue`, { method: 'POST', headers });
       if (r.status === 202) return true;
       console.error(`Continue ${id}: HTTP ${r.status}`);
     } catch (e) { console.error(`Continue ${id}:`, e.message); }
-    await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+    await new Promise((r) => setTimeout(r, 2000 * (i + 1)));
   }
   return false;
 }
 
 // Runs one step (serverless) or the whole audit (local). Safe to call again for a stalled audit.
-async function runStep(id) {
+async function runStep(id, { restart = false } = {}) {
   let meta = await store.readJSON(metaKey(id));
-  if (!meta || meta.status === 'done' || (meta.status === 'error' && !meta.checkpoint)) return;
-  if (STEP_MS && (meta.leaseUntil || 0) > Date.now()) return; // another invocation is on it
+  if (!meta || meta.status === 'done' || meta.status === 'error') return;
+  if (STEP_MS && (meta.leaseUntil || 0) > Date.now() && meta.leaseOwner !== 'create') return; // another invocation is on it
+  if (restart) {
+    meta.restarts = (meta.restarts || 0) + 1;
+    if (meta.restarts > MAX_RESTARTS) {
+      await store.writeJSON(metaKey(id), { ...meta, status: 'error', error: `Stopped after ${MAX_RESTARTS} automatic restarts during “${meta.stage || 'start'}”. A step keeps getting killed, usually from running out of memory. Lower “Pages to render” or raise the function memory, then run it again.`, finishedAt: Date.now(), leaseUntil: undefined });
+      return;
+    }
+  }
+  // Claim the lease, then confirm nobody else claimed it at the same moment.
+  const leaseOwner = crypto.randomBytes(6).toString('hex');
+  if (STEP_MS) {
+    await store.writeJSON(metaKey(id), { ...meta, leaseUntil: Date.now() + LEASE_MS, leaseOwner });
+    await new Promise((r) => setTimeout(r, 800));
+    const check = await store.readJSON(metaKey(id));
+    if (!check || check.leaseOwner !== leaseOwner) return;
+    meta = check;
+  }
   const saved = (await store.readJSON(stateKey(id))) || {};
   const logArr = saved.log || [];
   const j = { id, status: 'running', stage: (saved.audit && saved.audit.phase) || 'discover', progress: { done: 0, total: 1 }, log: logArr, summary: null };
   jobs.set(id, j);
-  meta = { ...meta, status: 'running', error: undefined, steps: (meta.steps || 0) + 1, leaseUntil: STEP_MS ? Date.now() + LEASE_MS : 0 };
+  meta = { ...meta, status: 'running', error: undefined, steps: (meta.steps || 0) + 1, leaseUntil: STEP_MS ? Date.now() + LEASE_MS : 0, leaseOwner };
   await store.writeJSON(metaKey(id), meta);
   const { config } = build(meta.input || {});
   if (STEP_MS) config.renderConcurrency = 1; // one page at a time keeps Chromium within serverless memory
@@ -108,21 +138,22 @@ async function runStep(id) {
   if (meta.steps > 1) log(`Continuing (step ${meta.steps})`);
   let paused = false;
   try {
-    const out = await runAudit(config, { log, stage, state: saved.audit || null, deadline: STEP_MS ? Date.now() + STEP_MS : null });
+    const checkpoint = STEP_MS ? (S) => store.writeJSON(stateKey(id), { audit: S, log: j.log.slice(-300) }).then(() => store.readJSON(metaKey(id))).then((mm) => mm && mm.leaseOwner === leaseOwner && store.writeJSON(metaKey(id), { ...mm, checkpoint: true, restarts: 0 })).catch(() => {}) : null;
+    const out = await runAudit(config, { log, stage, state: saved.audit || null, deadline: STEP_MS ? Date.now() + STEP_MS : null, checkpoint });
     await store.write(`audits/${id}/report.html`, out.html, 'text/html; charset=utf-8');
     await store.write(`audits/${id}/artifact.html`, out.fragment, 'text/plain; charset=utf-8');
     await store.writeJSON(`audits/${id}/qa-results.json`, out.json);
     await store.write(`audits/${id}/asana-tickets.md`, out.md, 'text/markdown; charset=utf-8');
     j.status = 'done';
     j.summary = out.summary;
-    Object.assign(meta, { status: 'done', summary: out.summary, finishedAt: Date.now(), checkpoint: false });
+    Object.assign(meta, { status: 'done', summary: out.summary, finishedAt: Date.now(), checkpoint: false, restarts: undefined, leaseOwner: undefined });
     log(`Done: ${out.summary.verdict}`);
   } catch (e) {
     if (e && e.paused) {
       paused = true;
       log(`Time budget reached. Saving progress and continuing in a new step…`);
       await store.writeJSON(stateKey(id), { audit: e.state, log: j.log.slice(-300) });
-      Object.assign(meta, { status: 'running', checkpoint: true, leaseUntil: 0, stage: j.stage, progress: j.progress });
+      Object.assign(meta, { status: 'running', checkpoint: true, leaseUntil: 0, leaseOwner: undefined, restarts: 0, stage: j.stage, progress: j.progress });
     } else {
       j.status = 'error';
       j.error = String((e && e.message) || e).split('\n')[0];
@@ -138,7 +169,7 @@ async function runStep(id) {
   jobs.delete(id);
   if (paused) {
     const ok = await chain(id, meta.runToken);
-    if (!ok) console.error(`Could not start the next step for ${id}. It shows as "Stalled" with a Resume button.`);
+    if (!ok) console.error(`Could not start the next step for ${id}. It restarts automatically the next time the app is opened or polled.`);
   }
 }
 
@@ -202,16 +233,24 @@ async function handle(req, res) {
     }
     if ((m = p.match(/^\/api\/profiles\/(.+)$/)) && req.method === 'DELETE') { const all = (await store.readJSON('profiles.json')) || {}; delete all[decodeURIComponent(m[1])]; await store.writeJSON('profiles.json', all); return send(res, 200, { ok: true }); }
 
-    if (p === '/api/audits' && req.method === 'GET') return send(res, 200, await listAudits());
+    if (p === '/api/audits' && req.method === 'GET') { const list = await listAudits(); kickStalled(list); return send(res, 200, list); }
+    if (p === '/api/cron/resume' && req.method === 'GET') { const list = await listAudits(); const n = list.filter(isStalled).length; kickStalled(list); return send(res, 200, { restarted: n }); }
     if (p === '/api/audits' && req.method === 'POST') {
       const b = await readBody(req);
       const { config, errors } = build(b);
       if (errors.length) return send(res, 400, { error: errors.join(' ') });
       const id = new Date().toISOString().slice(0, 10) + '-' + config.host.replace(/[^a-z0-9]+/gi, '-') + '-' + crypto.randomBytes(3).toString('hex');
-      await store.writeJSON(metaKey(id), { id, site: config.url, siteName: config.siteName, environment: config.environment, createdAt: Date.now(), status: 'queued', input: b, shares: [], runToken: crypto.randomBytes(18).toString('base64url') });
+      await store.writeJSON(metaKey(id), { id, site: config.url, siteName: config.siteName, environment: config.environment, createdAt: Date.now(), status: 'queued', input: b, shares: [], runToken: crypto.randomBytes(18).toString('base64url'), leaseUntil: Date.now() + 30000, leaseOwner: 'create' });
       if (STEP_MS) background(runStep(id));
       else { jobs.set(id, { id, status: 'queued', stage: 'queued', progress: { done: 0, total: 1 }, log: [], summary: null }); queue.push(id); scheduleNext(); }
       return send(res, 202, { id });
+    }
+
+    // Brand rules from a WordPress site (Application Password; not stored)
+    if (p === '/api/wp/profile' && req.method === 'POST') {
+      const b = await readBody(req);
+      try { return send(res, 200, await loadProfile(b)); }
+      catch (e) { return send(res, e.code && e.code < 600 ? e.code : 500, { error: e.message }); }
     }
 
     // Next step of a serverless audit (called by the previous step)
@@ -258,6 +297,7 @@ async function handle(req, res) {
       const live = jobs.get(id);
       delete meta.runToken;
       meta.stalled = isStalled(meta);
+      if (meta.stalled) kickStalled([meta]);
       if (live) return send(res, 200, { ...meta, ...publicJob(live) });
       if (!meta.log) { const t = await store.readText(`audits/${id}/log.txt`); meta.log = t ? t.split('\n').slice(-60) : []; }
       return send(res, 200, meta);
@@ -282,8 +322,9 @@ const server = http.createServer(handle);
 async function recover() {
   for (const m of await listAudits(1000)) if (m.status === 'running' || m.status === 'queued') {
     const full = await store.readJSON(metaKey(m.id));
-    // With a checkpoint it shows as Stalled and can be resumed; otherwise it failed.
-    await store.writeJSON(metaKey(m.id), full.checkpoint ? { ...full, leaseUntil: 0 } : { ...full, status: 'error', error: 'Interrupted (server restarted)' });
+    // Interrupted by a restart: continue from the checkpoint, or start again if there is none.
+    await store.writeJSON(metaKey(m.id), { ...full, leaseUntil: 0, leaseOwner: undefined });
+    if (!STEP_MS) { queue.push(m.id); }
   }
 }
 
@@ -292,5 +333,5 @@ module.exports.server = server;
 module.exports.store = store;
 
 if (require.main === module) {
-  recover().catch(() => {}).finally(() => server.listen(PORT, HOST, () => console.log(`QA Audit running at http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}  ·  storage: ${store.kind}`)));
+  recover().catch(() => {}).finally(() => { scheduleNext(); server.listen(PORT, HOST, () => console.log(`QA Audit running at http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}  ·  storage: ${store.kind}`)); });
 }

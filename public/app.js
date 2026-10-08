@@ -83,7 +83,7 @@ form.addEventListener('submit', async (e) => {
 });
 
 function verdictPill(a) {
-  if (a.stalled) return '<span class="verdict v-error" title="The next step did not start. Resume continues from the last checkpoint.">STALLED</span>';
+  if (a.stalled) return '<span class="verdict v-run" title="A step stopped unexpectedly. The audit restarts automatically from its last checkpoint.">RESUMING</span>';
   if (a.status === 'running' || a.status === 'queued') return `<span class="verdict v-run">${a.status === 'queued' ? 'QUEUED' : 'RUNNING'}</span>`;
   if (a.status === 'error') return '<span class="verdict v-error">FAILED</span>';
   const v = (a.summary && a.summary.verdict) || '';
@@ -112,7 +112,7 @@ let openShare = null; // audit id whose share panel is open (pauses history re-r
 
 async function refresh() {
   const list = await api('/api/audits').catch(() => []);
-  const active = list.find((a) => a.status === 'running' && !a.stalled) || list.find((a) => a.status === 'queued');
+  const active = list.find((a) => a.status === 'running') || list.find((a) => a.status === 'queued');
   if (active) { const d = await api('/api/audits/' + active.id).catch(() => null); renderLive(d); } else renderLive(null);
   $('#count').textContent = list.length ? `${list.length} saved` : '';
   $('#empty').hidden = list.length > 0;
@@ -122,7 +122,7 @@ async function refresh() {
     return `<li class="h-item" data-id="${a.id}"><div><div class="h-site">${esc(a.siteName || a.site)}</div><div class="h-meta">${esc(a.site)} · ${esc(a.environment)} · ${when(a.createdAt)}${a.summary ? ` · ${a.summary.pages} URLs · ${Math.round(a.summary.durationMs / 60000) || '<1'} min` : ''}${a.error ? ` · ${esc(a.error)}` : ''}</div></div>
       <div style="display:grid;gap:6px;justify-items:end">${verdictPill(a)}${done ? counts(a) : ''}</div>
       <div class="h-links">${done ? `<button type="button" class="share-btn" data-share="${a.id}" aria-expanded="false">Share${a.shareCount ? ` · ${a.shareCount}` : ''}</button><a href="${base}report.html" target="_blank" rel="noopener">Open report</a><a href="${base}report.html?download">Download HTML</a><a href="${base}asana-tickets.md?download">Asana tickets (.md)</a><a href="${base}qa-results.json?download">Results (.json)</a><a href="${base}artifact.html" target="_blank" rel="noopener" title="The report without page wrapper, ready to publish as a claude.ai artifact">Artifact source</a>` : ''}
-      ${a.stalled ? `<button type="button" class="share-btn" data-resume="${a.id}">Resume</button>` : ''}<button type="button" class="ghost" data-rerun="${a.id}">Run again</button>${a.status !== 'running' || a.stalled ? `<button type="button" class="ghost danger" data-del="${a.id}">Delete</button>` : ''}</div>
+      <button type="button" class="ghost" data-rerun="${a.id}">Run again</button>${a.status !== 'running' || a.stalled ? `<button type="button" class="ghost danger" data-del="${a.id}">Delete</button>` : ''}</div>
       <div class="share" id="share-${a.id}" hidden></div></li>`;
   }).join('');
   clearTimeout(refresh.t);
@@ -212,3 +212,80 @@ api('/api/info').then((i) => {
   if (!i.durable) { const w = $('#storeWarn'); w.hidden = false; }
 }).catch(() => {});
 loadProfiles('').then(refresh);
+
+// ───── Load brand rules from WordPress
+(function () {
+  const dlg = $('#wp');
+  const APP_ID = '6f1d2c3a-8b7e-4a5d-9c1f-2e3d4b5a6c7d';
+  let last = null;
+  const open = () => { $('#wpSite').value = $('#url').value || $('#wpSite').value; $('#wpErr').hidden = true; try { dlg.showModal(); } catch { dlg.setAttribute('open', ''); } };
+  const err = (m) => { const e = $('#wpErr'); e.textContent = m; e.hidden = !m; };
+  $('#wpOpen').addEventListener('click', open);
+  $('#wpClose').addEventListener('click', () => dlg.close());
+
+  $('#wpAuthorize').addEventListener('click', () => {
+    let site;
+    try { const u = new URL(/^https?:/i.test($('#wpSite').value) ? $('#wpSite').value : 'https://' + $('#wpSite').value); site = u.origin + u.pathname.replace(/\/+$/, ''); } catch { return err('Enter the WordPress site URL first.'); }
+    if (location.protocol !== 'https:' && !/^(localhost|127\.0\.0\.1)$/.test(location.hostname)) return err('WordPress only sends the approval back to an HTTPS address. Use the application password option instead.');
+    try { sessionStorage.setItem('qa-wp-pending', JSON.stringify({ site, form: readForm() })); } catch {}
+    const back = location.origin + location.pathname;
+    const q = new URLSearchParams({ app_name: 'DevriX QA Audit', app_id: APP_ID, success_url: back + '?wp=ok', reject_url: back + '?wp=rejected' });
+    location.href = `${site}/wp-admin/authorize-application.php?${q}`;
+  });
+
+  $('#wpLoad').addEventListener('click', () => load($('#wpSite').value, $('#wpUser').value.trim(), $('#wpPass').value));
+
+  async function load(siteUrl, username, appPassword) {
+    err('');
+    const box = $('#wpResult');
+    box.hidden = false; box.innerHTML = '<p class="muted">Reading theme settings…</p>';
+    try {
+      last = await api('/api/wp/profile', { method: 'POST', body: { siteUrl, username, appPassword } });
+      render(last);
+    } catch (e) { box.hidden = true; err(e.message); }
+    $('#wpPass').value = '';
+  }
+
+  function render(p) {
+    const sw = (c) => `<span class="sw" title="${esc(c.name || c.slug || '')}"><i style="background:${esc(c.color)}"></i>${esc(c.color)}${c.name ? ' · ' + esc(c.name) : ''}</span>`;
+    const colors = [...p.colors, ...p.palette.filter((x) => !p.colors.some((c) => c.color === x.color))];
+    const ph = (x, on) => `<button type="button" class="wp-chip" data-ph="${esc(x.label || x.digits)}" aria-pressed="${on}" title="${esc((x.where || []).join(', '))}">${esc(x.label || x.digits)}</button>`;
+    $('#wpResult').innerHTML = `<h3>Found on ${esc(p.site.name || p.site.url)}</h3>
+      <dl><dt>Source</dt><dd>${esc(p.source)}${p.user ? ` · signed in as ${esc(p.user)}` : ''}</dd>
+      <dt>Heading font</dt><dd>${esc((p.fonts.headings || {}).family || '—')}</dd>
+      <dt>Body font</dt><dd>${esc((p.fonts.body || {}).family || '—')}</dd>
+      <dt>Colours</dt><dd><div class="swatches">${colors.map(sw).join('') || '—'}</div></dd>
+      <dt>Phones</dt><dd>${p.phones.map((x) => ph(x, true)).join('') || '—'}${p.suggestedPhones.length ? `<div class="hint">Also on the homepage (click to add):</div>${p.suggestedPhones.map((x) => ph(x, false)).join('')}` : ''}</dd></dl>
+      ${p.notes.length ? `<ul class="wp-notes">${p.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>` : ''}
+      <div class="wp-actions"><button type="button" id="wpApply" class="primary small">Apply to form</button></div>`;
+  }
+
+  $('#wpResult').addEventListener('click', (e) => {
+    const c = e.target.closest('.wp-chip');
+    if (c) c.setAttribute('aria-pressed', c.getAttribute('aria-pressed') === 'true' ? 'false' : 'true');
+    if (e.target.id === 'wpApply' && last) {
+      const phones = [...$('#wpResult').querySelectorAll('.wp-chip[aria-pressed="true"]')].map((b) => b.dataset.ph);
+      const f = JSON.parse(JSON.stringify(last.form));
+      f.phones.expected = phones.join('\n');
+      if ($('#url').value) delete f.url;
+      if ($('#siteName').value) delete f.siteName;
+      fillForm(f);
+      dlg.close();
+      showErr('');
+      flash($('#wpOpen'), 'Loaded ✓');
+    }
+  });
+
+  // Returning from WordPress "Authorize application"
+  const q = new URLSearchParams(location.search);
+  if (q.get('wp')) {
+    let pending = null; try { pending = JSON.parse(sessionStorage.getItem('qa-wp-pending') || 'null'); sessionStorage.removeItem('qa-wp-pending'); } catch {}
+    history.replaceState(null, '', location.pathname); // drop the password from the address bar
+    if (pending && pending.form) fillForm(pending.form);
+    open();
+    if (q.get('wp') === 'ok' && q.get('user_login') && q.get('password')) {
+      $('#wpSite').value = q.get('site_url') || (pending && pending.site) || '';
+      load($('#wpSite').value, q.get('user_login'), q.get('password'));
+    } else err('Access was not approved in WordPress.');
+  }
+})();

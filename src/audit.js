@@ -6,6 +6,7 @@ const { renderAudit, menuTest, settle } = require('./render-audit');
 const { perfAudit } = require('./perf');
 const rules = require('./rules');
 const report = require('./report');
+const evidence = require('./evidence');
 
 function detectStack(home, headers, disc) {
   const s = [];
@@ -66,49 +67,20 @@ function pickRenderSample(cfg, urls) {
   return pick.slice(0, Math.max(budget, Math.min(pick.length, budget)));
 }
 
-async function captureEvidence(browser, cfg, issues, log, stop) {
-  const shots = {};
-  const want = issues.filter((i) => i.evidence && i.evidence.url && i.sev !== 'INFO').sort((a, b) => ['P0', 'P1', 'P2', 'P3'].indexOf(a.sev) - ['P0', 'P1', 'P2', 'P3'].indexOf(b.sev)).slice(0, 10);
-  const ctxs = {};
-  for (const i of want) {
-    if ((stop && stop()) || !browser.isConnected()) { log && log('Skipped remaining screenshots (time budget)'); break; }
-    const vp = i.evidence.viewport === 'mobile' ? 'mobile' : 'desktop';
-    if (!ctxs[vp]) ctxs[vp] = await browser.newContext(vp === 'mobile' ? { viewport: { width: cfg.viewports.mobile, height: 812 }, isMobile: true, hasTouch: true, deviceScaleFactor: 1 } : { viewport: { width: cfg.viewports.desktop, height: 760 } });
-    const page = await ctxs[vp].newPage();
-    try {
-      await page.goto(i.evidence.url, { waitUntil: 'load', timeout: cfg.timeoutMs });
-      await settle(page);
-      let found = false;
-      if (i.evidence.sel) {
-        found = await page.evaluate((sel) => {
-          let el; try { el = document.querySelector(sel); } catch { return false; }
-          if (!el) return false;
-          el.scrollIntoView({ block: 'center' });
-          el.style.setProperty('outline', '3px solid #ff2d95', 'important');
-          el.style.setProperty('outline-offset', '3px', 'important');
-          return true;
-        }, i.evidence.sel);
-      }
-      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 350))));
-      const buf = await page.screenshot({ type: 'jpeg', quality: 60 });
-      const key = i.key.replace(/[^a-z0-9]+/gi, '-').slice(0, 40) + '-' + vp;
-      shots[i.key] = { key, data: 'data:image/jpeg;base64,' + buf.toString('base64'), caption: `${vp === 'mobile' ? cfg.viewports.mobile + 'px mobile' : cfg.viewports.desktop + 'px desktop'}, ${rules.path(i.evidence.url)}${found ? ' (highlighted in pink)' : ''}` };
-    } catch (e) { log && log(`Screenshot failed for ${i.key}: ${String(e.message).split('\n')[0]}`); }
-    await page.close();
-  }
-  for (const c of Object.values(ctxs)) await c.close();
-  return shots;
-}
-
 class Paused extends Error { constructor(state) { super('paused'); this.paused = true; this.state = state; } }
 
 // Runs an audit. Resumable: pass `state` from a previous Paused error to continue where it stopped.
 // `deadline` (ms timestamp) makes it stop between pages and throw Paused, so serverless hosts can
 // split one audit across several function invocations. Without a deadline it runs to the end.
-async function runAudit(cfg, { log = () => {}, stage = () => {}, state = null, deadline = null } = {}) {
+async function runAudit(cfg, { log = () => {}, stage = () => {}, state = null, deadline = null, checkpoint = null } = {}) {
   const S = state || { startedAt: Date.now(), phase: 'discover' };
   const out = (ms) => deadline && Date.now() > deadline - (ms || 0);
-  const stop = () => out();
+  // Called between pages: also saves a checkpoint every ~45 s so a killed step loses little work.
+  let lastCk = Date.now(), ckBusy = false;
+  const stop = () => {
+    if (checkpoint && !ckBusy && Date.now() - lastCk > 45000) { lastCk = Date.now(); ckBusy = true; Promise.resolve(checkpoint(JSON.parse(JSON.stringify(S)))).finally(() => { ckBusy = false; }); }
+    return out();
+  };
   const pause = () => { throw new Paused(S); };
   let browser = null;
   const getBrowser = async () => {
@@ -179,8 +151,11 @@ async function runAudit(cfg, { log = () => {}, stage = () => {}, state = null, d
     ctx.stack = detectStack(S.pages[cfg.url], ctx.homeHeaders, S.disc);
     stage('report', 0, 1);
     const result = rules.run(ctx);
-    log(`${result.issues.length} issues, ${result.passes.length} passes`);
-    const shots = await captureEvidence(await getBrowser(), cfg, result.issues, log, stop);
+    if (!S.plan) { S.plan = evidence.buildPlan(result.issues, ctx, cfg); S.shots = {}; log(`${result.issues.length} issues, ${result.passes.length} passes. Taking ${Object.values(S.plan).flat().length} screenshots`); }
+    const flat = Object.values(S.plan).flat();
+    await loop('Screenshots', (b) => evidence.capture(b, cfg, flat, S.shots, settle, log, stop), () => Object.keys(S.shots).length);
+    const shots = {};
+    for (const [key, list] of Object.entries(S.plan)) shots[key] = list.map((t) => S.shots[evidence.tid(t)]).filter((x) => x && !x.failed);
     const built = report.build(ctx, result, shots);
     const json = report.resultsJson(built.org, ctx, result);
     const md = report.asanaMarkdown(built.org, ctx);

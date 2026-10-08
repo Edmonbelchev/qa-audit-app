@@ -98,3 +98,27 @@ button.small{padding:7px 14px;font-size:13.5px}
 button:disabled{opacity:.5;cursor:not-allowed}
 .warn{max-width:1240px;margin:16px auto 0;padding:10px 14px;border:1px solid var(--p2);background:var(--p2bg);color:var(--ink);border-radius:8px;font-size:14px}
 @media (max-width:1272px){.warn{margin-inline:16px}}
+
+.wp-row{display:flex;gap:10px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap}
+.wp-row .hint{flex:1 1 220px}
+.wp-btn{display:inline-flex;align-items:center;gap:8px;white-space:nowrap}
+.wp-btn span{font:700 12px/1 Georgia,serif;width:20px;height:20px;border-radius:50%;display:grid;place-items:center;background:var(--ink);color:var(--bg)}
+.wp-dlg{border:1px solid var(--line);border-radius:12px;padding:0;background:var(--surface);color:var(--ink);width:min(560px,calc(100vw - 32px));max-height:calc(100vh - 48px)}
+.wp-dlg::backdrop{background:rgba(5,10,20,.55)}
+.wp-dlg form{padding:18px;display:grid;gap:12px}
+.wp-head{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.wp-head h2{font-size:18px}
+.wp-connect{display:grid;gap:6px;justify-items:start}
+.wp-manual{border-top:1px solid var(--line);padding-top:10px;display:grid;gap:8px}
+.wp-manual[open]{display:grid}
+.wp-manual summary{cursor:pointer;font-weight:600;font-size:14px}
+.wp-manual > *:not(summary){margin-top:8px}
+.wp-result{border:1px solid var(--line);border-radius:8px;background:var(--sunk);padding:12px;display:grid;gap:10px}
+.wp-result h3{margin:0;font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.wp-result dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:6px 12px;font-size:14px}
+.wp-result dt{font-weight:600}
+.wp-result dd{margin:0;min-width:0}
+.wp-chip{display:inline-flex;align-items:center;gap:6px;font:12px var(--f-mono);border:1px solid var(--line);border-radius:999px;padding:3px 9px;background:var(--surface);margin:0 4px 4px 0;cursor:pointer}
+.wp-chip[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
+.wp-notes{margin:0;padding-left:18px;font-size:13px;color:var(--muted)}
+.wp-actions{display:flex;justify-content:flex-end;gap:8px}

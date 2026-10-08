@@ -38,6 +38,19 @@ const check = (ok, name) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}`); i
   const log = await fetch(`${base}/api/audits/${id}`).then((r) => r.json()).then((m) => m.log || []);
   check(log.some((l) => /Continuing \(step/.test(l)), 'log carries over between steps');
   console.log(`\nVerdict ${json.audit.status} ${JSON.stringify(json.summary.bySeverity)} in ${meta.steps} steps`);
-  srv.kill(); fixture.close();
+  srv.kill();
+
+  // ── Killed mid-audit: a new server picks it up automatically when the app is polled
+  const start = () => { const p = spawn(process.execPath, ['server.js'], { cwd: path.join(__dirname, '..'), env: { ...process.env, PORT: String(PORT), QA_DATA_DIR: data, QA_STEP_SECONDS: '8', QA_LEASE_GRACE_SECONDS: '2' }, stdio: ['ignore', 'pipe', 'inherit'] }); return new Promise((ok) => p.stdout.on('data', (d) => /running at/.test(String(d)) && ok(p))); };
+  let s1 = await start();
+  const { id: id2 } = await fetch(base + '/api/audits', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...body, renderSample: 8 }) }).then((r) => r.json());
+  for (let i = 0; i < 60; i++) { const m = await fetch(`${base}/api/audits/${id2}`).then((r) => r.json()); if (m.stage === 'render') break; await new Promise((r) => setTimeout(r, 500)); }
+  s1.kill('SIGKILL');
+  await new Promise((r) => setTimeout(r, 12000)); // lease runs out
+  const s2 = await start();
+  let m2;
+  for (let i = 0; i < 300; i++) { m2 = await fetch(`${base}/api/audits/${id2}`).then((r) => r.json()); if (m2.status === 'done' || m2.status === 'error') break; await fetch(base + '/api/audits'); await new Promise((r) => setTimeout(r, 1000)); }
+  check(m2.status === 'done', `killed audit resumed automatically and finished (${m2.status}${m2.error ? ': ' + m2.error : ''})`);
+  s2.kill(); fixture.close();
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

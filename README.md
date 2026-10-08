@@ -13,7 +13,22 @@ npm start            # → http://127.0.0.1:4317
 
 Enter a site URL, add the brand rules (fonts, hex colours, approved phone numbers), and click **Run audit**. A 250-page site takes about 5–10 minutes. Reports are stored in `data/audits/<id>/`. Save the rules as a **profile** so the next run for the same client is one click. An A&J Property Restoration profile is included.
 
-### CLI / CI
+### Load brand rules from WordPress
+
+Under **Brand rules**, click **Load from WordPress** to fill in the heading font, body font, brand colours, phone numbers and report name from the site itself.
+
+- **Connect with WordPress:** sends you to the site's `wp-admin/authorize-application.php`. You approve "DevriX QA Audit" there, and WordPress returns you with a new application password. This needs the app on HTTPS, or on localhost.
+- **Or enter an application password:** create one under **Users → Profile → Application Passwords** and paste it in with the username.
+
+The login is used for that one request and isn't stored. You can revoke the application password in WordPress at any time.
+
+Where the values come from (`src/wp-profile.js`):
+
+1. `GET /wp-json/devrix-qa/v1/profile`, if the theme provides it. The **american-restoration** theme does, in `inc/qa-profile-endpoint.php`. It returns the Theme Global Settings (ACF) palette, the headline and body fonts, and the header CTA, page-override and blog CTA phone numbers. It requires the `edit_theme_options` capability.
+2. Otherwise, core REST: the active theme's `theme.json` palette and fonts, plus the Site Editor's global styles.
+3. Always: `tel:` links on the homepage are offered as phone-number suggestions you can click to add.
+
+
 
 ```bash
 node cli.js https://example.com --out ./qa-reports
@@ -80,7 +95,7 @@ vercel --prod   # production
 
 **Long audits on Vercel**
 
-A Vercel function stops after 300 s, but a full audit of a 250-page site takes longer, so the app runs it in steps. Each step saves its progress to Blob and starts the next step itself. If a hand-off fails (for example during a redeploy), the audit shows **Stalled** with a **Resume** button, which continues from the last checkpoint.
+A Vercel function stops after 300 s, but a full audit of a 250-page site takes longer, so the app runs it in steps. Each step saves its progress to Blob and starts the next step itself. If a hand-off fails or a step is killed, the audit keeps running: whenever the app is open or polled, any audit with no active step restarts from its last checkpoint. Steps also save a checkpoint every ~45 s. After 4 restarts in a row without progress (usually out of memory), the audit stops with an explanation. On Vercel Pro, you can add a cron job to `/api/cron/resume` (e.g. every 5 minutes) so audits resume even when nobody has the app open. Hobby only allows daily crons.
 
 - Steps call the deployment's own URL (`VERCEL_URL`). If **Deployment Protection** is on, enable **Protection Bypass for Automation**. Vercel then sets `VERCEL_AUTOMATION_BYPASS_SECRET`, and the app sends it automatically. Or set `QA_SELF_URL` to a URL that isn't protected.
 - Checkpoints need durable storage, so connect Vercel Blob. Without it, steps on different instances can't see each other's progress.
@@ -113,6 +128,10 @@ The pipeline runs in this order: **discover → crawl → links → render → s
 
 Issues are grouped by root cause, not one per element. Each issue is placed in a report section: **Site-wide** when it spans several templates, otherwise its template group (for example *Services (11)*) or the single page. Severity follows the QA skill: P0 blocks launch; P1 is wrong contact details, broken mobile layout or headline fonts falling back; P2 covers accessibility blockers, broken links and performance; P3 is polish. The verdict is CRITICAL BLOCKER (any P0), NOT READY (5+ P1), READY WITH RISKS (any P1 or P2) or READY.
 
+## Report screenshots
+
+Each issue gets a slider with one screenshot per affected page or element, up to 8 per issue and 48 per report (`shotsPerIssue`, `maxScreenshots`). The element is outlined in pink. Each caption links to the live page, as does every page path under **Affects** and in the issue text. Clicking a screenshot opens it full size; use ← → to move between them.
+
 ## Outputs per audit
 
 - `report.html`: standalone house-template report with screenshots embedded, with the issue highlighted in pink
@@ -129,7 +148,7 @@ Issues are grouped by root cause, not one per element. Each issue is placed in a
 ## Tests
 
 ```bash
-npm test             # audit fixture (23 planted defects) + sharing/storage tests + step-mode test
+npm test             # audit fixture + sharing/storage + WordPress import + step-mode tests
 ```
 
 `test/run-steps.js` forces 8-second steps (`QA_STEP_SECONDS=8`), so one audit is split across several checkpointed steps the way it is on Vercel. It checks that the result matches a single run. Add `QA_USE_SPARTICUZ=1` to use the Vercel Chromium build, which needs Linux x64.

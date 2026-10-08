@@ -41,7 +41,7 @@
 
     <fieldset>
       <legend>Brand rules</legend>
-      <p class="hint">Copy these from the brand guide or Figma. Leave empty to skip design checks (they'll show as unverifiable).</p>
+      <div class="wp-row"><p class="hint">Load them from the WordPress site, or copy them from the brand guide or Figma. Leave empty to skip design checks.</p><button type="button" id="wpOpen" class="wp-btn"><span aria-hidden="true">W</span> Load from WordPress</button></div>
       <div class="row2">
         <div class="field"><label for="headingFonts">Heading fonts</label><input id="headingFonts" name="brand.headingFonts" placeholder="Bitter"></div>
         <div class="field"><label for="bodyFonts">Body fonts</label><input id="bodyFonts" name="brand.bodyFonts" placeholder="Poppins"></div>
@@ -89,6 +89,27 @@
     <p id="empty" class="muted empty" hidden>No audits yet. Enter a site URL and run your first audit. A typical 250-page WordPress site takes 5–10 minutes.</p>
   </section>
 </main>
+<dialog id="wp" class="wp-dlg" aria-labelledby="wpH">
+  <form method="dialog" id="wpForm" novalidate>
+    <div class="wp-head"><h2 id="wpH">Load brand rules from WordPress</h2><button type="button" class="ghost" id="wpClose" aria-label="Close">✕</button></div>
+    <p class="hint">Reads colours, heading and body fonts, and phone numbers from the site's theme settings. Your login is used for this request only and is not saved.</p>
+    <div class="field"><label for="wpSite">WordPress site URL</label><input id="wpSite" type="url" placeholder="https://example.com" autocomplete="url"></div>
+    <div class="wp-connect">
+      <button type="button" id="wpAuthorize" class="primary">Connect with WordPress</button>
+      <p class="hint">Opens your site's admin to approve access (creates an application password for “DevriX QA Audit”), then brings you back here. Needs HTTPS.</p>
+    </div>
+    <details class="wp-manual" id="wpManual"><summary>Or enter an application password</summary>
+      <p class="hint">In WordPress go to <b>Users → Profile → Application Passwords</b>, add one called “QA Audit”, and paste it here.</p>
+      <div class="row2">
+        <div class="field"><label for="wpUser">Username</label><input id="wpUser" autocomplete="username"></div>
+        <div class="field"><label for="wpPass">Application password</label><input id="wpPass" type="password" autocomplete="off" placeholder="xxxx xxxx xxxx xxxx xxxx xxxx"></div>
+      </div>
+      <button type="button" id="wpLoad">Load</button>
+    </details>
+    <p id="wpErr" class="err" role="alert" hidden></p>
+    <div id="wpResult" class="wp-result" hidden></div>
+  </form>
+</dialog>
 <script src="/app.js"></script>
 </body>
 </html>

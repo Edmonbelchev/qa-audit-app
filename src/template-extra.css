@@ -1,0 +1,15 @@
+/* Additions to the house template: screenshot slider, linked page paths, lightbox navigation */
+.where a,.ea a,.fix a,figcaption a{color:var(--accent);text-decoration:underline;text-underline-offset:2px;overflow-wrap:anywhere}
+.where .more{color:var(--muted)}
+.slider{display:grid;gap:8px;max-width:680px}
+.slider figure.slide{display:none;max-width:none;flex:none}
+.slider figure.slide.on{display:grid}
+.slider .zoom{max-height:420px}
+.sl-nav{display:flex;align-items:center;gap:10px}
+.sl-nav button,.lb-nav{font:600 18px/1 var(--f-body);width:36px;height:32px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink);cursor:pointer}
+.sl-nav button:hover{border-color:var(--accent)}
+.sl-count{font:600 12.5px var(--f-mono);color:var(--muted);font-variant-numeric:tabular-nums}
+dialog .lb-nav{position:absolute;top:50%;transform:translateY(-50%);right:auto;padding:0}
+#lbp{left:8px}#lbn{right:8px;left:auto}
+.lb-cap{margin:6px 0 0;font-size:13px;color:#e6ebf3;text-align:center}
+@media (max-width:640px){.slider{max-width:100%}}

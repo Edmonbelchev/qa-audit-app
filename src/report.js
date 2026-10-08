@@ -6,6 +6,8 @@ const { path } = require('./rules');
 
 const HEAD = fs.readFileSync(pathMod.join(__dirname, 'template-head.html'), 'utf8');
 const SCRIPT = fs.readFileSync(pathMod.join(__dirname, 'template-script.js'), 'utf8');
+const EXTRA_CSS = fs.readFileSync(pathMod.join(__dirname, 'template-extra.css'), 'utf8');
+const EXTRA_JS = fs.readFileSync(pathMod.join(__dirname, 'template-extra.js'), 'utf8');
 const ORD = ['P0', 'P1', 'P2', 'P3', 'INFO'];
 const SEVL = { P0: 'P0 Critical', P1: 'P1 High', P2: 'P2 Medium', P3: 'P3 Low', INFO: 'Info' };
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
@@ -83,18 +85,40 @@ function build(ctx, result, shots) {
   const d = new Date(ctx.startedAt);
   const dateStr = `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
   const used = {};
+  // Clickable page paths: any "/path" in text that is a URL we crawled or link-checked.
+  const known = new Set();
+  const addKnown = (u) => { try { const x = new URL(u); if (x.host === new URL(cfg.url).host) known.add(x.pathname + x.search); } catch {} };
+  (disc.urls || []).forEach(addKnown);
+  Object.keys((ctx.links || {}).internal || {}).forEach(addKnown);
+  const abs = (p) => cfg.origin + p;
+  const pageLink = (u) => { const p = path(u); return `<a href="${esc(/^https?:/.test(u) ? u : abs(p))}" target="_blank" rel="noopener">${esc(p)}</a>`; };
+  const linkify = (html) => html.replace(/(^|[\s(;,:])(\/[A-Za-z0-9\-._~%/?=&]*)/g, (m, pre, p) => {
+    const clean = p.replace(/[.,;:)]+$/, ''); const tail = p.slice(clean.length);
+    return known.has(clean) && clean.length > 1 ? `${pre}<a href="${esc(abs(clean))}" target="_blank" rel="noopener">${clean}</a>${tail}` : m;
+  });
+  const richL = (t) => linkify(rich(t));
   const card = (i) => {
-    const sh = shots[i.key];
+    const list = (shots[i.key] || []).filter((x) => x && x.data);
     let shotHtml = '';
-    if (sh) { used[sh.key] = sh.data; shotHtml = `<div class="shots"><figure><button class="zoom" type="button" data-src="${sh.key}" aria-label="Enlarge screenshot: ${esc(sh.caption)}"><img alt="${esc(sh.caption)}" data-k="${sh.key}" loading="lazy"></button><figcaption>${esc(sh.caption)}</figcaption></figure></div>`; }
-    const affects = i.affects.length ? (i.affects.length > 8 ? `${i.affects.length} URLs, e.g. ${i.affects.slice(0, 6).map(path).join(', ')}` : i.affects.map(path).join(', ')) : 'All pages';
+    if (list.length) {
+      const figs = list.map((sh, n) => {
+        const k = `${i.key.replace(/[^a-z0-9]+/gi, '-').slice(0, 40)}-${n}`;
+        used[k] = sh.data;
+        const label = `${sh.viewport === 'mobile' ? cfg.viewports.mobile + 'px mobile' : cfg.viewports.desktop + 'px desktop'}${sh.note ? ' · ' + sh.note : ''}${sh.visible ? ' · highlighted in pink' + (sh.count > 1 ? ` (${sh.count})` : '') : sh.found ? ' · element hidden at this size' : ''}`;
+        return `<figure class="slide${n === 0 ? ' on' : ''}" data-i="${n}"><button class="zoom" type="button" data-src="${k}" aria-label="Enlarge screenshot ${n + 1} of ${list.length}: ${esc(path(sh.url))}"><img alt="${esc(path(sh.url) + ' — ' + label)}" data-k="${k}" loading="lazy"></button><figcaption>${pageLink(sh.url)} · ${esc(label)}</figcaption></figure>`;
+      }).join('');
+      const nav = list.length > 1 ? `<div class="sl-nav"><button type="button" class="sl-prev" aria-label="Previous screenshot">‹</button><span class="sl-count" aria-live="polite">1 / ${list.length}</span><button type="button" class="sl-next" aria-label="Next screenshot">›</button></div>` : '';
+      shotHtml = `<div class="shots slider" data-n="${list.length}">${figs}${nav}</div>`;
+    }
+    const shownAff = i.affects.slice(0, 12);
+    const affects = i.affects.length ? shownAff.map(pageLink).join(', ') + (i.affects.length > shownAff.length ? ` <span class="more">and ${i.affects.length - shownAff.length} more</span>` : '') : 'All pages';
     const fig = i.design && cfg.brand.designUrl ? `<a class="fig" href="${esc(cfg.brand.designUrl)}" target="_blank" rel="noopener">Design reference ↗</a>` : '';
     return `<article class="issue sev-${i.sev}" data-sev="${i.sev}" id="${i.id}">
 <header class="ih"><span class="badge b-${i.sev}">${SEVL[i.sev]}</span><span class="cat">${esc(i.cat)}</span><span class="iid">${i.id}</span></header>
 <h3>${rich(i.title)}</h3>
-<p class="where"><span>Affects</span> ${esc(affects)}</p>
-<div class="ea"><div><h4>Expected</h4><p>${rich(i.expected)}</p></div><div><h4>Actual</h4><p>${rich(i.actual)}</p></div></div>
-${shotHtml}<div class="fix"><h4>Suggested fix</h4><p>${rich(i.fix)}${i.confidence !== 'HIGH' ? ` <em>(Confidence: ${i.confidence.toLowerCase()}.)</em>` : ''}</p>${fig}</div>
+<p class="where"><span>Affects</span> ${affects}</p>
+<div class="ea"><div><h4>Expected</h4><p>${richL(i.expected)}</p></div><div><h4>Actual</h4><p>${richL(i.actual)}</p></div></div>
+${shotHtml}<div class="fix"><h4>Suggested fix</h4><p>${richL(i.fix)}${i.confidence !== 'HIGH' ? ` <em>(Confidence: ${i.confidence.toLowerCase()}.)</em>` : ''}</p>${fig}</div>
 </article>`;
   };
   const secHtml = org.sections.map((s) => `<section class="page" id="p-${s.slug}"><div class="ph"><h2>${esc(s.name)}</h2>${s.href ? `<a href="${esc(s.href)}" target="_blank" rel="noopener" class="url">${esc(s.urlText)}</a>` : `<span class="url">${esc(s.urlText)}</span>`}<span class="src">Design source: ${esc(cfg.brand.designLabel || (cfg.brand.headingFonts.length || cfg.brand.colors.length ? 'Brand profile (fonts and colours)' : 'None configured'))}</span>${s.note ? `<p class="note">${esc(s.note)}</p>` : ''}</div>
@@ -134,11 +158,12 @@ ${secHtml}
 <section class="page" id="passes"><div class="ph"><h2>What passed</h2></div><ul class="passes">${result.passes.map((p) => `<li>${rich(p)}</li>`).join('')}</ul></section>
 <section class="page" id="method"><div class="ph"><h2>How this was checked</h2></div><div class="method">${method.map((p) => `<p>${rich(p)}</p>`).join('')}</div></section>
 </div>
-<dialog id="lb" aria-label="Screenshot"><button type="button" id="lbx">Close</button><img id="lbi" alt=""></dialog>
+<dialog id="lb" aria-label="Screenshot"><button type="button" id="lbx">Close</button><img id="lbi" alt=""><button type="button" id="lbp" class="lb-nav" aria-label="Previous screenshot" hidden>‹</button><button type="button" id="lbn" class="lb-nav" aria-label="Next screenshot" hidden>›</button><p id="lbc" class="lb-cap"></p></dialog>
 <script>
 ${SCRIPT.replace('__IMGS__', JSON.stringify(used)).replace(/\{\{site-slug\}\}/g, cfg.host.replace(/[^a-z0-9]/gi, '-'))}
+${EXTRA_JS}
 </script>`;
-  const head = HEAD.replace('{{TITLE}}', esc(cfg.siteName) + ' QA Audit');
+  const head = HEAD.replace('{{TITLE}}', esc(cfg.siteName) + ' QA Audit') + '\n<style>\n' + EXTRA_CSS + '</style>';
   // Artifact-ready fragment (claude.ai adds the skeleton) and a standalone document for local viewing.
   const fragment = head + '\n' + body;
   const standalone = `<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">${head}<style>body{margin:0}[hidden]{display:none!important}img{max-width:100%}</style></head><body>\n${body}\n</body></html>`;
