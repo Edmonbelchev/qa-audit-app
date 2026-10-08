@@ -29,7 +29,34 @@ The CLI exits with code `1` when it finds P0 or P1 issues, so it can gate a depl
 |---|---|---|
 | `PORT` | 4317 | Web UI port |
 | `HOST` | 127.0.0.1 | Use `0.0.0.0` to share the app on your network |
-| `QA_DATA_DIR` | `./data` | Where profiles and reports are stored |
+| `QA_DATA_DIR` | `./data` | Where profiles and reports are stored (local disk) |
+| `QA_ADMIN_PASSWORD` | — | Required when the app is reachable by others (Vercel, or `HOST` not localhost). Protects everything except share links |
+| `QA_ADMIN_USER` | `admin` | Username for the admin login |
+| `PUBLIC_URL` | request host | Base for share links, e.g. `https://qa.devrix.com` |
+| `BLOB_READ_WRITE_TOKEN` | — | Set by Vercel when you connect a Blob store; switches storage to Vercel Blob |
+| `QA_BLOB_ACCESS` | `private` | `private` or `public`, matching your Blob store type |
+| `QA_BLOB_PREFIX` | `qa-audit` | Folder inside the Blob store |
+| `QA_ALLOW_OPEN` | — | `1` turns off the admin lock on a trusted network (not recommended) |
+
+## Sharing reports
+
+Click **Share** next to a finished audit to create a link like `https://your-app/s/At5AajAq5t4FOC9a_A0fNp2A`. Anyone with the link can open the report without signing in. Everything else in the app stays behind the admin login.
+
+- **Expiry:** 7, 30 or 90 days, or never. Expired links show a "Link expired" page (HTTP 410).
+- **Turn off:** revokes a link immediately. Deleting an audit removes all of its links.
+- **Include Asana tickets and JSON:** adds `…/s/<token>/tickets.md` and `…/s/<token>/results.json` downloads.
+- **Views:** each link counts its views and shows when it was last opened.
+- Tokens are 144-bit random values. Shared pages send `X-Robots-Tag: noindex` and `Referrer-Policy: no-referrer`, so they aren't indexed and the link doesn't leak to other sites.
+
+Others can only open a link if they can reach the app. That works in these setups:
+
+| Where the app runs | Storage | Notes |
+|---|---|---|
+| **Vercel** (recommended) | Vercel Blob | In the project: **Storage → Create → Blob** (private) and connect it. That adds `BLOB_READ_WRITE_TOKEN`. Then set `QA_ADMIN_PASSWORD` and redeploy |
+| A server or VM | Local disk (`data/`) | `HOST=0.0.0.0 QA_ADMIN_PASSWORD=… PUBLIC_URL=https://qa.example.com npm start` behind HTTPS (Caddy or nginx) |
+| Your laptop, temporarily | Local disk | `cloudflared tunnel --url http://localhost:4317`. Set `QA_ADMIN_PASSWORD` first, since the tunnel exposes the admin UI too. Links stop working when the laptop or tunnel is off |
+
+Storage is chosen automatically. With `BLOB_READ_WRITE_TOKEN` set, profiles, audits, reports, logs and share links all go to Blob under `qa-audit/`. Otherwise they go to `data/`. The app header shows which one is active. On Vercel without Blob, it shows a warning, because `/tmp` is wiped between instances.
 
 ## Deploy on Vercel
 
@@ -39,7 +66,9 @@ The same web UI and API run on [Vercel](https://vercel.com) as a single Node.js 
 
 1. Push this repo to GitHub (or GitLab/Bitbucket).
 2. In the Vercel dashboard: **Add New → Project**, import the repo, leave the default settings (Vercel reads `vercel.json`).
-3. Deploy. No environment variables are required for a first try.
+3. **Storage → Create → Blob** (private) and connect it to the project, so reports and share links persist.
+4. **Settings → Environment Variables:** add `QA_ADMIN_PASSWORD`. Without it, the admin UI stays locked on Vercel and only share links work.
+5. Deploy.
 
 Or with the [Vercel CLI](https://vercel.com/docs/cli):
 
@@ -54,12 +83,12 @@ vercel --prod   # production
 | | Local (`npm start`) | Vercel |
 |---|---|---|
 | Chromium | Playwright download (`postinstall`) | `@sparticuz/chromium` (Chromium 141, matches Playwright 1.56) |
-| Reports & profiles | `data/` (persistent) | `/tmp/qa-audit-data` (ephemeral; lost on cold starts and redeploys) |
+| Reports, profiles, share links | `data/` (persistent) | Vercel Blob when connected; otherwise `/tmp` (ephemeral, with a warning in the UI) |
+| Live progress | In memory | Saved to storage every ~3 s, so any instance can show it |
 | Job queue | In-process on one server | Same pattern with `@vercel/functions` `waitUntil` after `202` responses |
 | Max audit time | Unlimited | **300s** per function (`maxDuration` in `vercel.json`; Pro plan). Large sites may hit the limit — use the CLI locally or on a VM for full crawls. |
 | Memory | Default Node | **3008 MB** (configured for Playwright) |
 
-For durable reports on Vercel, set `QA_DATA_DIR` to a mounted path only if you add external storage; otherwise treat cloud deploys as demos or small audits.
 
 ## What it checks
 
@@ -93,8 +122,10 @@ Issues are grouped by root cause, not one per element. Each issue is placed in a
 ## Tests
 
 ```bash
-npm test
+npm test             # audit fixture (23 planted defects) + sharing/storage tests
 ```
+
+`test/run-sharing.js` runs the same storage tests against local disk and an in-memory Vercel Blob stand-in. It then checks the share flow end to end: create, open without login, expiry, revoke, file downloads, admin lock and password login.
 
 This starts a small WordPress-like fixture site (`test/fixture/server.js`) with 23 planted defects. It runs a full audit and checks that each defect is reported. The report is written to `test/output/`.
 
@@ -116,4 +147,6 @@ src/rules.js              rules engine: raw data → grouped, ranked issues and 
 src/report.js             house-template HTML, Asana markdown, JSON
 src/template-*.{html,js}  report CSS and script, copied verbatim from the QA skill template
 src/default-profiles.json starter profile (A&J Property Restoration)
+src/storage.js            local disk / Vercel Blob storage drivers
+src/shares.js             share links: create, expire, revoke, view counts
 ```

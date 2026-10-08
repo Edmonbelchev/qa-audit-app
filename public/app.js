@@ -107,35 +107,105 @@ function renderLive(a) {
   const lg = live.querySelector('.log'); lg.scrollTop = lg.scrollHeight;
 }
 
+let openShare = null; // audit id whose share panel is open (pauses history re-render)
+
 async function refresh() {
   const list = await api('/api/audits').catch(() => []);
   const active = list.find((a) => a.status === 'running') || list.find((a) => a.status === 'queued');
   if (active) { const d = await api('/api/audits/' + active.id).catch(() => null); renderLive(d); } else renderLive(null);
   $('#count').textContent = list.length ? `${list.length} saved` : '';
   $('#empty').hidden = list.length > 0;
-  $('#history').innerHTML = list.map((a) => {
+  if (!openShare) $('#history').innerHTML = list.map((a) => {
     const done = a.status === 'done';
     const base = `/reports/${a.id}/`;
-    return `<li class="h-item"><div><div class="h-site">${esc(a.siteName || a.site)}</div><div class="h-meta">${esc(a.site)} · ${esc(a.environment)} · ${when(a.createdAt)}${a.summary ? ` · ${a.summary.pages} URLs · ${Math.round(a.summary.durationMs / 60000) || '<1'} min` : ''}${a.error ? ` · ${esc(a.error)}` : ''}</div></div>
+    return `<li class="h-item" data-id="${a.id}"><div><div class="h-site">${esc(a.siteName || a.site)}</div><div class="h-meta">${esc(a.site)} · ${esc(a.environment)} · ${when(a.createdAt)}${a.summary ? ` · ${a.summary.pages} URLs · ${Math.round(a.summary.durationMs / 60000) || '<1'} min` : ''}${a.error ? ` · ${esc(a.error)}` : ''}</div></div>
       <div style="display:grid;gap:6px;justify-items:end">${verdictPill(a)}${done ? counts(a) : ''}</div>
-      <div class="h-links">${done ? `<a href="${base}report.html" target="_blank" rel="noopener">Open report</a><a href="${base}report.html?download">Download HTML</a><a href="${base}asana-tickets.md?download">Asana tickets (.md)</a><a href="${base}qa-results.json?download">Results (.json)</a><a href="${base}artifact.html" target="_blank" rel="noopener" title="The report without page wrapper, ready to publish as a claude.ai artifact">Artifact source</a>` : ''}
-      <button type="button" class="ghost" data-rerun="${a.id}">Run again</button>${a.status !== 'running' ? `<button type="button" class="ghost danger" data-del="${a.id}">Delete</button>` : ''}</div></li>`;
+      <div class="h-links">${done ? `<button type="button" class="share-btn" data-share="${a.id}" aria-expanded="false">Share${a.shareCount ? ` · ${a.shareCount}` : ''}</button><a href="${base}report.html" target="_blank" rel="noopener">Open report</a><a href="${base}report.html?download">Download HTML</a><a href="${base}asana-tickets.md?download">Asana tickets (.md)</a><a href="${base}qa-results.json?download">Results (.json)</a><a href="${base}artifact.html" target="_blank" rel="noopener" title="The report without page wrapper, ready to publish as a claude.ai artifact">Artifact source</a>` : ''}
+      <button type="button" class="ghost" data-rerun="${a.id}">Run again</button>${a.status !== 'running' ? `<button type="button" class="ghost danger" data-del="${a.id}">Delete</button>` : ''}</div>
+      <div class="share" id="share-${a.id}" hidden></div></li>`;
   }).join('');
   clearTimeout(refresh.t);
   refresh.t = setTimeout(refresh, active ? 1500 : 8000);
 }
+
+// ───── Share links
+const EXPIRY = [['7', '7 days'], ['30', '30 days'], ['90', '90 days'], ['0', 'Never']];
+function fmtDate(t) { return t ? new Date(t).toLocaleDateString([], { dateStyle: 'medium' }) : ''; }
+function shareRow(s) {
+  const st = { active: s.expiresAt ? `Expires ${fmtDate(s.expiresAt)}` : 'No expiry', expired: `Expired ${fmtDate(s.expiresAt)}`, revoked: 'Turned off' }[s.state];
+  const views = `${s.views || 0} view${s.views === 1 ? '' : 's'}${s.lastViewedAt ? `, last ${fmtDate(s.lastViewedAt)}` : ''}`;
+  return `<li class="sl ${s.state}"><div class="sl-url"><input type="text" readonly value="${esc(s.url)}" aria-label="Share link" id="sl-${esc(s.token)}"><button type="button" data-copy="${esc(s.token)}" ${s.state !== 'active' ? 'disabled' : ''}>Copy</button></div>
+    <div class="sl-meta"><span class="state-${s.state}">${st}</span> · ${views}${s.includeFiles ? ' · tickets + JSON included' : ''}${s.label ? ` · ${esc(s.label)}` : ''}${s.state === 'active' ? ` <button type="button" class="ghost danger" data-revoke="${esc(s.token)}">Turn off</button>` : ''}</div></li>`;
+}
+async function openSharePanel(id) {
+  const box = $('#share-' + id);
+  const btn = document.querySelector(`[data-share="${id}"]`);
+  if (openShare && openShare !== id) closeSharePanel();
+  if (openShare === id) return closeSharePanel();
+  openShare = id;
+  btn && btn.setAttribute('aria-expanded', 'true');
+  box.hidden = false;
+  box.innerHTML = '<p class="muted">Loading links…</p>';
+  const list = await api(`/api/audits/${id}/shares`).catch((e) => { box.innerHTML = `<p class="err">${esc(e.message)}</p>`; return null; });
+  if (!list) return;
+  box.innerHTML = `<div class="share-new"><label for="exp-${id}">Link expires</label><select id="exp-${id}">${EXPIRY.map(([v, l]) => `<option value="${v}"${v === '30' ? ' selected' : ''}>${l}</option>`).join('')}</select>
+    <input id="lbl-${id}" type="text" placeholder="Label, e.g. Client – Jane" aria-label="Label (optional)" maxlength="80">
+    <label class="check"><input type="checkbox" id="inc-${id}"> Include Asana tickets and JSON</label>
+    <button type="button" class="primary small" data-create="${id}">Create link</button></div>
+    <p class="hint">Anyone with the link can open the report without signing in. Turn a link off at any time.</p>
+    <ul class="share-list">${list.length ? list.map(shareRow).join('') : '<li class="muted">No links yet.</li>'}</ul>`;
+}
+function closeSharePanel() {
+  if (!openShare) return;
+  const box = $('#share-' + openShare); if (box) { box.hidden = true; box.innerHTML = ''; }
+  const btn = document.querySelector(`[data-share="${openShare}"]`); btn && btn.setAttribute('aria-expanded', 'false');
+  openShare = null;
+  refresh();
+}
+async function copyText(input, btn) {
+  try { await navigator.clipboard.writeText(input.value); flash(btn, 'Copied'); }
+  catch { input.focus(); input.select(); flash(btn, 'Press ⌘C'); }
+}
+
 $('#history').addEventListener('click', async (e) => {
   const del = e.target.closest('[data-del]');
   const rr = e.target.closest('[data-rerun]');
+  const sh = e.target.closest('[data-share]');
+  const cr = e.target.closest('[data-create]');
+  const cp = e.target.closest('[data-copy]');
+  const rv = e.target.closest('[data-revoke]');
+  if (sh) return openSharePanel(sh.dataset.share);
+  if (cr) {
+    const id = cr.dataset.create;
+    cr.disabled = true;
+    try {
+      const s = await api(`/api/audits/${id}/shares`, { method: 'POST', body: { days: $('#exp-' + id).value, includeFiles: $('#inc-' + id).checked, label: $('#lbl-' + id).value } });
+      openShare = null; await openSharePanel(id);
+      const input = document.getElementById('sl-' + s.token);
+      if (input) copyText(input, document.querySelector(`[data-copy="${s.token}"]`));
+    } catch (err) { showErr(err.message); cr.disabled = false; }
+    return;
+  }
+  if (cp) return copyText(document.getElementById('sl-' + cp.dataset.copy), cp);
+  if (rv) {
+    if (rv.dataset.confirm !== '1') { rv.dataset.confirm = '1'; rv.textContent = 'Click again to turn off'; setTimeout(() => { rv.dataset.confirm = ''; rv.textContent = 'Turn off'; }, 3000); return; }
+    await api('/api/shares/' + rv.dataset.revoke, { method: 'DELETE' }).catch((err) => showErr(err.message));
+    const id = openShare; openShare = null; return openSharePanel(id);
+  }
   if (del) {
     if (del.dataset.confirm !== '1') { del.dataset.confirm = '1'; del.textContent = 'Click again to delete'; setTimeout(() => { del.dataset.confirm = ''; del.textContent = 'Delete'; }, 3000); return; }
-    await api('/api/audits/' + del.dataset.del, { method: 'DELETE' }).catch((err) => alertInline(err.message)); refresh();
+    if (openShare === del.dataset.del) openShare = null;
+    await api('/api/audits/' + del.dataset.del, { method: 'DELETE' }).catch((err) => showErr(err.message)); refresh();
   }
   if (rr) {
     const a = await api('/api/audits/' + rr.dataset.rerun);
     if (a.input) { form.reset(); fillForm(a.input); window.scrollTo({ top: 0, behavior: 'smooth' }); $('#url').focus(); }
   }
 });
-function alertInline(m) { showErr(m); }
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && openShare) closeSharePanel(); });
 
+api('/api/info').then((i) => {
+  $('#storage').textContent = `Reports stored on ${i.storage}`;
+  if (!i.durable) { const w = $('#storeWarn'); w.hidden = false; }
+}).catch(() => {});
 loadProfiles('').then(refresh);

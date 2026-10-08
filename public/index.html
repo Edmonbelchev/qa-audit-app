@@ -13,9 +13,11 @@
   <div class="bar-in">
     <span class="mark" aria-hidden="true">QA</span>
     <div><strong>QA Audit</strong><span class="sub">Crawl-based WordPress audit · DevriX house report</span></div>
+    <span id="storage" class="sub store"></span>
   </div>
 </header>
 
+<p id="storeWarn" class="warn" role="status" hidden>Reports are stored in this server&rsquo;s temporary folder and will disappear. Connect a Vercel Blob store (it sets <code>BLOB_READ_WRITE_TOKEN</code>) so reports and share links persist.</p>
 <main class="layout">
   <form id="f" class="panel form" novalidate>
     <div class="ph">

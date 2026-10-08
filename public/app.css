@@ -76,3 +76,25 @@ button.danger{color:var(--p0)}
 .pills{display:flex;gap:4px;flex-wrap:wrap}
 .mini{font:600 11px/1 var(--f-mono);padding:4px 6px;border-radius:4px;font-variant-numeric:tabular-nums}
 .b-P0{background:var(--p0bg);color:var(--p0)} .b-P1{background:var(--p1bg);color:var(--p1)} .b-P2{background:var(--p2bg);color:var(--p2)} .b-P3{background:var(--p3bg);color:var(--p3)} .b-INFO{background:var(--infobg);color:var(--info)}
+
+.store{margin-left:auto;font-family:var(--f-mono);font-size:12px}
+.share-btn{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);padding:3px 10px;font-size:12.5px}
+.share{grid-column:1/-1;border-top:1px dashed var(--line);padding-top:10px;display:grid;gap:8px;min-width:0}
+.share-new{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.share-new label{font-size:13px}
+.share-new select{width:auto}
+.share-new input[type=text]{flex:1 1 180px;width:auto}
+.share-new .check{margin:0}
+button.small{padding:7px 14px;font-size:13.5px}
+.share-list{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+.sl{display:grid;gap:4px;min-width:0}
+.sl-url{display:flex;gap:6px;min-width:0}
+.sl-url input{font-family:var(--f-mono);font-size:12.5px;flex:1;min-width:0}
+.sl-url button{padding:4px 12px;font-size:12.5px}
+.sl-meta{font-size:12.5px;color:var(--muted)}
+.sl-meta button{padding:1px 8px;font-size:12px}
+.sl.revoked .sl-url input,.sl.expired .sl-url input{text-decoration:line-through;opacity:.6}
+.state-active{color:var(--ok)} .state-expired,.state-revoked{color:var(--p0)}
+button:disabled{opacity:.5;cursor:not-allowed}
+.warn{max-width:1240px;margin:16px auto 0;padding:10px 14px;border:1px solid var(--p2);background:var(--p2bg);color:var(--ink);border-radius:8px;font-size:14px}
+@media (max-width:1272px){.warn{margin-inline:16px}}

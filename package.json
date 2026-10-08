@@ -3,20 +3,25 @@
   "version": "1.0.0",
   "description": "Crawl-based WordPress QA audit that produces the DevriX house-template report. No AI required.",
   "main": "server.js",
-  "bin": { "qa-audit": "cli.js" },
+  "bin": {
+    "qa-audit": "cli.js"
+  },
   "scripts": {
     "start": "node server.js",
     "audit": "node cli.js",
-    "test": "node test/run-fixture.js",
+    "test": "node test/run-fixture.js && node test/run-sharing.js",
     "postinstall": "node scripts/postinstall.js"
   },
-  "engines": { "node": ">=18.17" },
+  "engines": {
+    "node": ">=18.17"
+  },
   "license": "UNLICENSED",
   "private": true,
   "dependencies": {
     "@sparticuz/chromium": "141.0.0",
     "@vercel/functions": "^2.0.0",
-    "playwright-core": "1.56.0"
+    "playwright-core": "1.56.0",
+    "@vercel/blob": "2.8.0"
   },
   "devDependencies": {
     "playwright": "1.56.0"
