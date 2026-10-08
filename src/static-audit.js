@@ -3,22 +3,28 @@ const { request, pool } = require('./http');
 const { extractStatic } = require('./extract');
 const { normalize, sameSite, NON_PAGE } = require('./discover');
 
-async function staticAudit(cfg, urls, browser, log, progress) {
+// opts.existing: pages already done (resume); opts.stop(): return true to stop taking new URLs (time budget).
+async function staticAudit(cfg, urls, browser, log, progress, opts = {}) {
+  const pages = opts.existing || {};
+  const todo = urls.filter((u) => !pages[u]);
+  let homeHeaders = opts.homeHeaders || null;
+  if (!todo.length) return { pages, homeHeaders, complete: true };
   const page = await browser.newPage();
-  const pages = {};
-  let homeHeaders = null;
-  await pool(urls, cfg.concurrency, async (u) => {
+  const base = urls.length - todo.length;
+  let stopped = false;
+  await pool(todo, cfg.concurrency, async (u) => {
+    if (stopped || (opts.stop && opts.stop())) { stopped = true; return; }
     const r = await request(u, cfg);
     const rec = { url: u, status: r.status, finalUrl: r.finalUrl, hops: r.hops, ms: r.ms, ttfb: r.ttfb, error: r.error || null, bytes: (r.text || '').length, contentType: (r.headers || {})['content-type'] || '' };
     if (u === cfg.url) homeHeaders = r.headers || {};
     if (r.status === 200 && /html/.test(rec.contentType)) {
       try { Object.assign(rec, await page.evaluate(extractStatic, { html: r.text, url: r.finalUrl })); }
-      catch (e) { rec.parseError = String(e.message || e).slice(0, 200); }
+      catch (e) { if (!browser.isConnected()) { stopped = true; return; } rec.parseError = String(e.message || e).slice(0, 200); }
     }
     pages[u] = rec;
-  }, (done, total) => progress && progress(done, total));
-  await page.close();
-  return { pages, homeHeaders };
+  }, (done) => progress && progress(base + done, urls.length));
+  await page.close().catch(() => {});
+  return { pages, homeHeaders, complete: urls.every((u) => pages[u]) };
 }
 
 async function linkAudit(cfg, pages, log, progress) {

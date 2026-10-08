@@ -34,6 +34,8 @@ The CLI exits with code `1` when it finds P0 or P1 issues, so it can gate a depl
 | `BLOB_READ_WRITE_TOKEN` | — | Set by Vercel when you connect a Blob store; switches storage to Vercel Blob |
 | `QA_BLOB_ACCESS` | `private` | `private` or `public`, matching your Blob store type |
 | `QA_BLOB_PREFIX` | `qa-audit` | Folder inside the Blob store |
+| `QA_STEP_SECONDS` | 240 on Vercel, off locally | Split audits into time-boxed steps that resume from a checkpoint |
+| `QA_SELF_URL` | `VERCEL_URL` | URL the app calls to start its next step |
 
 ## Sharing reports
 
@@ -76,16 +78,23 @@ vercel          # link and deploy preview
 vercel --prod   # production
 ```
 
+**Long audits on Vercel**
+
+A Vercel function stops after 300 s, but a full audit of a 250-page site takes longer, so the app runs it in steps. Each step saves its progress to Blob and starts the next step itself. If a hand-off fails (for example during a redeploy), the audit shows **Stalled** with a **Resume** button, which continues from the last checkpoint.
+
+- Steps call the deployment's own URL (`VERCEL_URL`). If **Deployment Protection** is on, enable **Protection Bypass for Automation**. Vercel then sets `VERCEL_AUTOMATION_BYPASS_SECRET`, and the app sends it automatically. Or set `QA_SELF_URL` to a URL that isn't protected.
+- Checkpoints need durable storage, so connect Vercel Blob. Without it, steps on different instances can't see each other's progress.
+
 **How it differs from local**
 
 | | Local (`npm start`) | Vercel |
 |---|---|---|
-| Chromium | Playwright download (`postinstall`) | `@sparticuz/chromium` (Chromium 141, matches Playwright 1.56) |
+| Chromium | Playwright download (`postinstall`) | `@sparticuz/chromium` (Chromium 141, matches Playwright 1.56). Its `--single-process` flag is removed in `src/browser.js`, because with Playwright it closes the whole browser when a page closes |
 | Reports, profiles, share links | `data/` (persistent) | Vercel Blob when connected; otherwise `/tmp` (ephemeral, with a warning in the UI) |
 | Live progress | In memory | Saved to storage every ~3 s, so any instance can show it |
-| Job queue | In-process on one server | Same pattern with `@vercel/functions` `waitUntil` after `202` responses |
-| Max audit time | Unlimited | **300s** per function (`maxDuration` in `vercel.json`; Pro plan). Large sites may hit the limit — use the CLI locally or on a VM for full crawls. |
-| Memory | Default Node | **3008 MB** (configured for Playwright) |
+| Running an audit | One process, start to finish | **Steps.** Each function run works for up to `QA_STEP_SECONDS` (240 s), saves a checkpoint (`audits/<id>/state.json`) and calls `/api/audits/<id>/continue` to start the next step. A 250-page site takes about 4–8 steps |
+| Max audit time | Unlimited | No overall limit. Each step stays under the 300 s `maxDuration` |
+| Memory | Default Node | **2048 MB** (`vercel.json`). Pages render one at a time on Vercel to stay within it |
 
 
 ## What it checks
@@ -120,8 +129,10 @@ Issues are grouped by root cause, not one per element. Each issue is placed in a
 ## Tests
 
 ```bash
-npm test             # audit fixture (23 planted defects) + sharing/storage tests
+npm test             # audit fixture (23 planted defects) + sharing/storage tests + step-mode test
 ```
+
+`test/run-steps.js` forces 8-second steps (`QA_STEP_SECONDS=8`), so one audit is split across several checkpointed steps the way it is on Vercel. It checks that the result matches a single run. Add `QA_USE_SPARTICUZ=1` to use the Vercel Chromium build, which needs Linux x64.
 
 `test/run-sharing.js` runs the same storage tests against local disk and an in-memory Vercel Blob stand-in. It then checks the share flow end to end: create, open without login, expiry, revoke, file downloads, and deleting an audit.
 

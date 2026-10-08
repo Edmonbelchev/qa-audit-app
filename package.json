@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node server.js",
     "audit": "node cli.js",
-    "test": "node test/run-fixture.js && node test/run-sharing.js",
+    "test": "node test/run-fixture.js && node test/run-sharing.js && node test/run-steps.js",
     "postinstall": "node scripts/postinstall.js"
   },
   "engines": {

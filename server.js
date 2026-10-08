@@ -16,77 +16,130 @@ const HOST = process.env.HOST || (ON_VERCEL ? '0.0.0.0' : '127.0.0.1');
 const store = createStorage(process.env, { root: ON_VERCEL ? path.join('/tmp', 'qa-audit-data') : path.join(__dirname, 'data') });
 
 // ───────────── Jobs
-const jobs = new Map(); // id -> live state (this instance only; progress is also persisted to storage)
+// Local server: one audit at a time, start to finish.
+// Serverless (Vercel, or QA_STEP_SECONDS set): each invocation runs one time-boxed step, saves a checkpoint
+// (audits/<id>/state.json) and calls /api/audits/<id>/continue to start the next step in a fresh invocation.
+const STEP_MS = process.env.QA_STEP_SECONDS ? +process.env.QA_STEP_SECONDS * 1000 : ON_VERCEL ? 240000 : 0;
+const LEASE_MS = STEP_MS + 60000;
+const jobs = new Map(); // id -> live state in this instance
 const queue = [];
 let running = null;
 
-function scheduleNext() {
-  const run = () => next().catch((e) => console.error('Audit queue error:', e));
-  if (ON_VERCEL) {
-    try { const { waitUntil } = require('@vercel/functions'); waitUntil(run()); return; } catch { /* not available locally */ }
-  }
-  setImmediate(run);
+function background(promise) {
+  const p = Promise.resolve(promise).catch((e) => console.error('Audit error:', e));
+  if (ON_VERCEL) { try { require('@vercel/functions').waitUntil(p); } catch { /* local */ } }
+  return p;
 }
+function scheduleNext() { background(next()); }
 
 const metaKey = (id) => `audits/${id}/meta.json`;
-const send = (res, code, body, type = 'application/json', extra = {}) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...extra }); res.end(type === 'application/json' ? JSON.stringify(body) : body); };
+const stateKey = (id) => `audits/${id}/state.json`;
+const send = (res, code, body, type = 'application/json', extra = {}) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...extra }); res.end(type === 'application/json' && !Buffer.isBuffer(body) ? JSON.stringify(body) : body); };
 const readBody = (req) => new Promise((ok, no) => {
   if (req.body !== undefined) return ok(typeof req.body === 'string' ? JSON.parse(req.body || '{}') : req.body || {}); // pre-parsed by a host runtime
   let b = ''; req.on('data', (c) => { b += c; if (b.length > 1e6) req.destroy(); }); req.on('end', () => { try { ok(b ? JSON.parse(b) : {}); } catch (e) { no(e); } });
 });
 const publicJob = (j) => ({ id: j.id, status: j.status, stage: j.stage, progress: j.progress, log: j.log.slice(-60), error: j.error, summary: j.summary, position: queue.indexOf(j.id) });
+const isStalled = (m) => m.status === 'running' && !jobs.has(m.id) && !!m.checkpoint && (m.leaseUntil || 0) < Date.now();
 
 async function listAudits(limit = 200) {
   const keys = (await store.list('audits/')).filter((k) => k.endsWith('/meta.json')).sort().reverse().slice(0, limit);
   const metas = await Promise.all(keys.map((k) => store.readJSON(k)));
   return metas.filter(Boolean).map((m) => {
-    const out = jobs.has(m.id) ? { ...m, ...publicJob(jobs.get(m.id)) } : m;
-    delete out.input; delete out.log;
+    const out = jobs.has(m.id) ? { ...m, ...publicJob(jobs.get(m.id)) } : { ...m };
+    out.stalled = isStalled(m);
+    delete out.input; delete out.log; delete out.runToken;
     out.shareCount = (m.shares || []).length;
     return out;
   }).sort((a, b) => b.createdAt - a.createdAt);
 }
 
+// Local queue
 async function next() {
   if (running || !queue.length) return;
   const id = queue.shift();
-  const j = jobs.get(id);
   running = id;
-  j.status = 'running';
-  const meta = (await store.readJSON(metaKey(id))) || {};
-  meta.status = 'running';
+  try { await runStep(id); } finally { running = null; scheduleNext(); }
+}
+
+function selfBase() {
+  if (process.env.QA_SELF_URL) return process.env.QA_SELF_URL.replace(/\/$/, '');
+  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
+  if (process.env.PUBLIC_URL) return process.env.PUBLIC_URL.replace(/\/$/, '');
+  return `http://127.0.0.1:${PORT}`;
+}
+
+async function chain(id, token) {
+  const headers = { 'x-qa-run-token': token };
+  if (process.env.VERCEL_AUTOMATION_BYPASS_SECRET) headers['x-vercel-protection-bypass'] = process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const r = await fetch(`${selfBase()}/api/audits/${id}/continue`, { method: 'POST', headers });
+      if (r.status === 202) return true;
+      console.error(`Continue ${id}: HTTP ${r.status}`);
+    } catch (e) { console.error(`Continue ${id}:`, e.message); }
+    await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+  }
+  return false;
+}
+
+// Runs one step (serverless) or the whole audit (local). Safe to call again for a stalled audit.
+async function runStep(id) {
+  let meta = await store.readJSON(metaKey(id));
+  if (!meta || meta.status === 'done' || (meta.status === 'error' && !meta.checkpoint)) return;
+  if (STEP_MS && (meta.leaseUntil || 0) > Date.now()) return; // another invocation is on it
+  const saved = (await store.readJSON(stateKey(id))) || {};
+  const logArr = saved.log || [];
+  const j = { id, status: 'running', stage: (saved.audit && saved.audit.phase) || 'discover', progress: { done: 0, total: 1 }, log: logArr, summary: null };
+  jobs.set(id, j);
+  meta = { ...meta, status: 'running', error: undefined, steps: (meta.steps || 0) + 1, leaseUntil: STEP_MS ? Date.now() + LEASE_MS : 0 };
   await store.writeJSON(metaKey(id), meta);
+  const { config } = build(meta.input || {});
+  if (STEP_MS) config.renderConcurrency = 1; // one page at a time keeps Chromium within serverless memory
   let lastSave = 0;
   let saving = null;
   const persist = (force) => {
     if (saving || (!force && Date.now() - lastSave < 3000)) return;
     lastSave = Date.now();
-    saving = store.writeJSON(metaKey(id), { ...meta, status: j.status, stage: j.stage, progress: j.progress, log: j.log.slice(-30) }).catch(() => {}).finally(() => { saving = null; });
+    saving = store.readJSON(metaKey(id)).then((latest) => store.writeJSON(metaKey(id), { ...meta, shares: (latest && latest.shares) || meta.shares || [], stage: j.stage, progress: j.progress, log: j.log.slice(-30) })).catch(() => {}).finally(() => { saving = null; });
   };
   const log = (m) => { j.log.push(`${new Date().toISOString().slice(11, 19)}  ${m}`); persist(); };
   const stage = (s, d, t) => { j.stage = s; j.progress = { done: d, total: t }; persist(); };
+  if (meta.steps > 1) log(`Continuing (step ${meta.steps})`);
+  let paused = false;
   try {
-    const out = await runAudit(j.config, { log, stage });
+    const out = await runAudit(config, { log, stage, state: saved.audit || null, deadline: STEP_MS ? Date.now() + STEP_MS : null });
     await store.write(`audits/${id}/report.html`, out.html, 'text/html; charset=utf-8');
     await store.write(`audits/${id}/artifact.html`, out.fragment, 'text/plain; charset=utf-8');
     await store.writeJSON(`audits/${id}/qa-results.json`, out.json);
     await store.write(`audits/${id}/asana-tickets.md`, out.md, 'text/markdown; charset=utf-8');
     j.status = 'done';
     j.summary = out.summary;
-    Object.assign(meta, { status: 'done', summary: out.summary, finishedAt: Date.now() });
+    Object.assign(meta, { status: 'done', summary: out.summary, finishedAt: Date.now(), checkpoint: false });
     log(`Done: ${out.summary.verdict}`);
   } catch (e) {
-    j.status = 'error';
-    j.error = String((e && e.message) || e).split('\n')[0];
-    Object.assign(meta, { status: 'error', error: j.error, finishedAt: Date.now() });
-    log('Failed: ' + j.error);
+    if (e && e.paused) {
+      paused = true;
+      log(`Time budget reached. Saving progress and continuing in a new step…`);
+      await store.writeJSON(stateKey(id), { audit: e.state, log: j.log.slice(-300) });
+      Object.assign(meta, { status: 'running', checkpoint: true, leaseUntil: 0, stage: j.stage, progress: j.progress });
+    } else {
+      j.status = 'error';
+      j.error = String((e && e.message) || e).split('\n')[0];
+      Object.assign(meta, { status: 'error', error: j.error, finishedAt: Date.now(), checkpoint: false });
+      log('Failed: ' + j.error);
+    }
   }
   if (saving) await saving;
   const latest = (await store.readJSON(metaKey(id))) || {};
-  await store.write(`audits/${id}/log.txt`, j.log.join('\n'), 'text/plain; charset=utf-8');
-  await store.writeJSON(metaKey(id), { ...meta, shares: latest.shares || meta.shares || [], stage: undefined, progress: undefined, log: undefined });
-  running = null;
-  scheduleNext();
+  const final = { ...meta, shares: latest.shares || meta.shares || [], log: paused ? j.log.slice(-30) : undefined };
+  if (!paused) { final.stage = undefined; final.progress = undefined; final.leaseUntil = undefined; await store.write(`audits/${id}/log.txt`, j.log.join('\n'), 'text/plain; charset=utf-8'); await store.remove(stateKey(id)).catch(() => {}); }
+  await store.writeJSON(metaKey(id), final);
+  jobs.delete(id);
+  if (paused) {
+    const ok = await chain(id, meta.runToken);
+    if (!ok) console.error(`Could not start the next step for ${id}. It shows as "Stalled" with a Resume button.`);
+  }
 }
 
 // ───────────── Pages
@@ -155,11 +208,26 @@ async function handle(req, res) {
       const { config, errors } = build(b);
       if (errors.length) return send(res, 400, { error: errors.join(' ') });
       const id = new Date().toISOString().slice(0, 10) + '-' + config.host.replace(/[^a-z0-9]+/gi, '-') + '-' + crypto.randomBytes(3).toString('hex');
-      await store.writeJSON(metaKey(id), { id, site: config.url, siteName: config.siteName, environment: config.environment, createdAt: Date.now(), status: 'queued', input: b, shares: [] });
-      jobs.set(id, { id, config, status: 'queued', stage: 'queued', progress: { done: 0, total: 1 }, log: [], summary: null });
-      queue.push(id);
-      scheduleNext();
+      await store.writeJSON(metaKey(id), { id, site: config.url, siteName: config.siteName, environment: config.environment, createdAt: Date.now(), status: 'queued', input: b, shares: [], runToken: crypto.randomBytes(18).toString('base64url') });
+      if (STEP_MS) background(runStep(id));
+      else { jobs.set(id, { id, status: 'queued', stage: 'queued', progress: { done: 0, total: 1 }, log: [], summary: null }); queue.push(id); scheduleNext(); }
       return send(res, 202, { id });
+    }
+
+    // Next step of a serverless audit (called by the previous step)
+    if ((m = p.match(/^\/api\/audits\/([\w-]+)\/continue$/)) && req.method === 'POST') {
+      const meta = await store.readJSON(metaKey(m[1]));
+      if (!meta || !meta.runToken || req.headers['x-qa-run-token'] !== meta.runToken) return send(res, 403, { error: 'Invalid run token.' });
+      background(runStep(m[1]));
+      return send(res, 202, { ok: true });
+    }
+    // Resume a stalled audit from its checkpoint (UI button)
+    if ((m = p.match(/^\/api\/audits\/([\w-]+)\/resume$/)) && req.method === 'POST') {
+      const meta = await store.readJSON(metaKey(m[1]));
+      if (!meta) return send(res, 404, { error: 'Audit not found.' });
+      if (!isStalled(meta)) return send(res, 409, { error: 'This audit is not stalled.' });
+      background(runStep(m[1]));
+      return send(res, 202, { ok: true });
     }
 
     // Shares for an audit
@@ -180,7 +248,7 @@ async function handle(req, res) {
       const meta = await store.readJSON(metaKey(id));
       if (!meta) return send(res, 404, { error: 'Audit not found.' });
       if (req.method === 'DELETE') {
-        if (running === id || meta.status === 'running') return send(res, 409, { error: 'This audit is running. Wait for it to finish.' });
+        if (running === id || jobs.has(id) || (meta.status === 'running' && !isStalled(meta))) return send(res, 409, { error: 'This audit is running. Wait for it to finish.' });
         const qi = queue.indexOf(id); if (qi >= 0) queue.splice(qi, 1);
         jobs.delete(id);
         await shares.removeAllForAudit(store, id, meta);
@@ -188,6 +256,8 @@ async function handle(req, res) {
         return send(res, 200, { ok: true });
       }
       const live = jobs.get(id);
+      delete meta.runToken;
+      meta.stalled = isStalled(meta);
       if (live) return send(res, 200, { ...meta, ...publicJob(live) });
       if (!meta.log) { const t = await store.readText(`audits/${id}/log.txt`); meta.log = t ? t.split('\n').slice(-60) : []; }
       return send(res, 200, meta);
@@ -212,7 +282,8 @@ const server = http.createServer(handle);
 async function recover() {
   for (const m of await listAudits(1000)) if (m.status === 'running' || m.status === 'queued') {
     const full = await store.readJSON(metaKey(m.id));
-    await store.writeJSON(metaKey(m.id), { ...full, status: 'error', error: 'Interrupted (server restarted)' });
+    // With a checkpoint it shows as Stalled and can be resumed; otherwise it failed.
+    await store.writeJSON(metaKey(m.id), full.checkpoint ? { ...full, leaseUntil: 0 } : { ...full, status: 'error', error: 'Interrupted (server restarted)' });
   }
 }
 

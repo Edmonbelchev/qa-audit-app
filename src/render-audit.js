@@ -48,23 +48,27 @@ async function renderOne(ctx, url, cfg, vpName, collectNet) {
   return result;
 }
 
-async function renderAudit(cfg, browser, urls, log, progress) {
-  const out = {};
+// opts.existing: results already done (resume); opts.stop(): return true to stop taking new pages.
+async function renderAudit(cfg, browser, urls, log, progress, opts = {}) {
+  const out = opts.existing || {};
+  const todo = urls.filter((u) => !out[u]);
+  if (!todo.length) return { render: out, complete: true };
   const ctxs = {
-    desktop: await browser.newContext({ viewport: { width: cfg.viewports.desktop, height: 900 }, userAgent: undefined }),
+    desktop: await browser.newContext({ viewport: { width: cfg.viewports.desktop, height: 900 } }),
     mobile: await browser.newContext({ viewport: { width: cfg.viewports.mobile, height: 812 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 }),
   };
-  let done = 0;
-  await pool(urls, 2, async (u) => {
+  let stopped = false;
+  await pool(todo, cfg.renderConcurrency || 2, async (u) => {
+    if (stopped || (opts.stop && opts.stop()) || !browser.isConnected()) { stopped = true; return; }
     const d = await renderOne(ctxs.desktop, u, cfg, 'desktop', true);
     const m = await renderOne(ctxs.mobile, u, cfg, 'mobile', false);
+    if (!browser.isConnected()) { stopped = true; return; } // browser crashed: redo this page in a fresh browser
     out[u] = { desktop: d, mobile: m };
-    done++;
-    progress && progress(done, urls.length);
+    progress && progress(Object.keys(out).filter((k) => urls.includes(k)).length, urls.length);
   });
-  await ctxs.desktop.close();
-  await ctxs.mobile.close();
-  return out;
+  await ctxs.desktop.close().catch(() => {});
+  await ctxs.mobile.close().catch(() => {});
+  return { render: out, complete: urls.every((u) => out[u]) };
 }
 
 async function menuTest(cfg, browser) {

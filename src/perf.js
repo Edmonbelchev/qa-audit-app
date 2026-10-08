@@ -37,9 +37,11 @@ async function measure(browser, url, cfg) {
 
 const median = (a) => { const s = a.filter((x) => Number.isFinite(x)).sort((x, y) => x - y); if (!s.length) return null; const m = Math.floor(s.length / 2); return s.length % 2 ? s[m] : Math.round((s[m - 1] + s[m]) / 2); };
 
-async function perfAudit(cfg, browser, urls, log) {
-  const out = [];
+async function perfAudit(cfg, browser, urls, log, opts = {}) {
+  const out = opts.existing || [];
   for (const u of urls) {
+    if (out.some((x) => x.url === u)) continue;
+    if ((opts.stop && opts.stop()) || !browser.isConnected()) break;
     const runs = [];
     for (let i = 0; i < Math.max(1, cfg.perfRuns); i++) runs.push(await measure(browser, u, cfg));
     const ok = runs.filter((r) => !r.error);
@@ -62,7 +64,7 @@ async function perfAudit(cfg, browser, urls, log) {
     out.push(summary);
     log && log(`Performance ${new URL(u).pathname}: TTFB median ${summary.median.ttfb} ms, LCP ${summary.median.lcp} ms`);
   }
-  return out;
+  return { perf: out, complete: urls.every((u) => out.some((x) => x.url === u)) };
 }
 
 module.exports = { perfAudit };

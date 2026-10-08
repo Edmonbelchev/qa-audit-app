@@ -66,11 +66,12 @@ function pickRenderSample(cfg, urls) {
   return pick.slice(0, Math.max(budget, Math.min(pick.length, budget)));
 }
 
-async function captureEvidence(browser, cfg, issues, log) {
+async function captureEvidence(browser, cfg, issues, log, stop) {
   const shots = {};
   const want = issues.filter((i) => i.evidence && i.evidence.url && i.sev !== 'INFO').sort((a, b) => ['P0', 'P1', 'P2', 'P3'].indexOf(a.sev) - ['P0', 'P1', 'P2', 'P3'].indexOf(b.sev)).slice(0, 10);
   const ctxs = {};
   for (const i of want) {
+    if ((stop && stop()) || !browser.isConnected()) { log && log('Skipped remaining screenshots (time budget)'); break; }
     const vp = i.evidence.viewport === 'mobile' ? 'mobile' : 'desktop';
     if (!ctxs[vp]) ctxs[vp] = await browser.newContext(vp === 'mobile' ? { viewport: { width: cfg.viewports.mobile, height: 812 }, isMobile: true, hasTouch: true, deviceScaleFactor: 1 } : { viewport: { width: cfg.viewports.desktop, height: 760 } });
     const page = await ctxs[vp].newPage();
@@ -99,50 +100,95 @@ async function captureEvidence(browser, cfg, issues, log) {
   return shots;
 }
 
-async function runAudit(cfg, { log = () => {}, stage = () => {} } = {}) {
-  const startedAt = Date.now();
-  const browser = await launchBrowser();
+class Paused extends Error { constructor(state) { super('paused'); this.paused = true; this.state = state; } }
+
+// Runs an audit. Resumable: pass `state` from a previous Paused error to continue where it stopped.
+// `deadline` (ms timestamp) makes it stop between pages and throw Paused, so serverless hosts can
+// split one audit across several function invocations. Without a deadline it runs to the end.
+async function runAudit(cfg, { log = () => {}, stage = () => {}, state = null, deadline = null } = {}) {
+  const S = state || { startedAt: Date.now(), phase: 'discover' };
+  const out = (ms) => deadline && Date.now() > deadline - (ms || 0);
+  const stop = () => out();
+  const pause = () => { throw new Paused(S); };
+  let browser = null;
+  const getBrowser = async () => {
+    if (browser && browser.isConnected()) return browser;
+    if (browser) { log('Browser restarted'); try { await browser.close(); } catch {} }
+    browser = await launchBrowser();
+    return browser;
+  };
+  // Re-run a resumable step until complete; restarts the browser if it crashed, gives up after 3 tries without progress.
+  const loop = async (name, run, count) => {
+    let stuck = 0;
+    for (;;) {
+      const before = count();
+      const r = await run(await getBrowser());
+      if (r.complete) return r;
+      if (out()) pause();
+      if (count() === before && ++stuck >= 3) throw new Error(`${name} made no progress (browser keeps crashing). Try a lower "Pages to render" or more function memory.`);
+    }
+  };
   try {
-    stage('discover', 0, 1);
-    log(`Discovering URLs on ${cfg.url}`);
-    const disc = await discover(cfg, log);
-    log(`${disc.urls.length} URLs to audit (${disc.method})`);
-
-    stage('static', 0, disc.urls.length);
-    const { pages, homeHeaders } = await staticAudit(cfg, disc.urls, browser, log, (d, t) => stage('static', d, t));
-    log(`Fetched and parsed ${Object.keys(pages).length} pages`);
-
-    stage('links', 0, 1);
-    const links = await linkAudit(cfg, pages, log, (d, t) => stage('links', d, t));
-    const legacy = await legacyAudit(cfg, log);
-
-    const sample = pickRenderSample(cfg, disc.urls.filter((u) => pages[u] && pages[u].status === 200));
-    log(`Rendering ${sample.length} pages at ${cfg.viewports.desktop}px and ${cfg.viewports.mobile}px`);
-    stage('render', 0, sample.length);
-    const render = await renderAudit(cfg, browser, sample, log, (d, t) => stage('render', d, t));
-    const menu = await menuTest(cfg, browser);
-    log(`Mobile menu: ${menu.result}`);
-
-    stage('perf', 0, 1);
-    const perfUrls = [cfg.url, ...sample.filter((u) => u !== cfg.url && groupOf(u, cfg) !== groupOf(cfg.url, cfg))].filter((u, i, a) => a.indexOf(u) === i);
-    const byGroup = []; const seenG = new Set();
-    for (const u of perfUrls) { const g = groupOf(u, cfg); if (!seenG.has(g) || u === cfg.url) { seenG.add(g); byGroup.push(u); } }
-    const perf = await perfAudit(cfg, browser, byGroup.slice(0, Math.max(1, cfg.perfPages)), log);
-
-    const ctx = { cfg, disc, pages, homeHeaders: homeHeaders || {}, links, legacy, render, menu, perf, startedAt };
-    ctx.stack = detectStack(pages[cfg.url], ctx.homeHeaders, disc);
+    if (S.phase === 'discover') {
+      stage('discover', 0, 1);
+      log(`Discovering URLs on ${cfg.url}`);
+      S.disc = await discover(cfg, log);
+      log(`${S.disc.urls.length} URLs to audit (${S.disc.method})`);
+      S.pages = {};
+      S.phase = 'static';
+    }
+    if (S.phase === 'static') {
+      stage('static', Object.keys(S.pages).length, S.disc.urls.length);
+      const r = await loop('Crawl', (b) => staticAudit(cfg, S.disc.urls, b, log, (d, t) => stage('static', d, t), { existing: S.pages, homeHeaders: S.homeHeaders, stop }), () => Object.keys(S.pages).length);
+      S.homeHeaders = r.homeHeaders || {};
+      log(`Fetched and parsed ${Object.keys(S.pages).length} pages`);
+      S.phase = 'links';
+      if (out(60000)) pause();
+    }
+    if (S.phase === 'links') {
+      stage('links', 0, 1);
+      S.links = await linkAudit(cfg, S.pages, log, (d, t) => stage('links', d, t));
+      S.legacy = await legacyAudit(cfg, log);
+      S.sample = pickRenderSample(cfg, S.disc.urls.filter((u) => S.pages[u] && S.pages[u].status === 200));
+      S.render = {};
+      log(`Rendering ${S.sample.length} pages at ${cfg.viewports.desktop}px and ${cfg.viewports.mobile}px`);
+      S.phase = 'render';
+      if (out(60000)) pause();
+    }
+    if (S.phase === 'render') {
+      stage('render', Object.keys(S.render).length, S.sample.length);
+      await loop('Rendering', (b) => renderAudit(cfg, b, S.sample, log, (d, t) => stage('render', d, t), { existing: S.render, stop }), () => Object.keys(S.render).length);
+      S.menu = await menuTest(cfg, await getBrowser());
+      log(`Mobile menu: ${S.menu.result}`);
+      const perfUrls = [cfg.url, ...S.sample.filter((u) => u !== cfg.url && groupOf(u, cfg) !== groupOf(cfg.url, cfg))].filter((u, i, a) => a.indexOf(u) === i);
+      const byGroup = []; const seenG = new Set();
+      for (const u of perfUrls) { const g = groupOf(u, cfg); if (!seenG.has(g) || u === cfg.url) { seenG.add(g); byGroup.push(u); } }
+      S.perfUrls = byGroup.slice(0, Math.max(1, cfg.perfPages));
+      S.perf = [];
+      S.phase = 'perf';
+      if (out(60000)) pause();
+    }
+    if (S.phase === 'perf') {
+      stage('perf', S.perf.length, S.perfUrls.length);
+      await loop('Speed test', (b) => perfAudit(cfg, b, S.perfUrls, log, { existing: S.perf, stop }), () => S.perf.length);
+      S.phase = 'report';
+      if (out(90000)) pause(); // evidence screenshots need a fresh time budget
+    }
+    // report
+    const ctx = { cfg, disc: S.disc, pages: S.pages, homeHeaders: S.homeHeaders || {}, links: S.links, legacy: S.legacy, render: S.render, menu: S.menu, perf: S.perf, startedAt: S.startedAt };
+    ctx.stack = detectStack(S.pages[cfg.url], ctx.homeHeaders, S.disc);
     stage('report', 0, 1);
     const result = rules.run(ctx);
     log(`${result.issues.length} issues, ${result.passes.length} passes`);
-    const shots = await captureEvidence(browser, cfg, result.issues, log);
+    const shots = await captureEvidence(await getBrowser(), cfg, result.issues, log, stop);
     const built = report.build(ctx, result, shots);
     const json = report.resultsJson(built.org, ctx, result);
     const md = report.asanaMarkdown(built.org, ctx);
     stage('done', 1, 1);
-    return { issueKeys: result.issues.map((i) => i.key), html: built.standalone, fragment: built.fragment, json, md, summary: { verdict: built.org.verdict, counts: built.org.cnt, pages: disc.urls.length, rendered: sample.length, durationMs: Date.now() - startedAt } };
+    return { issueKeys: result.issues.map((i) => i.key), html: built.standalone, fragment: built.fragment, json, md, summary: { verdict: built.org.verdict, counts: built.org.cnt, pages: S.disc.urls.length, rendered: S.sample.length, durationMs: Date.now() - S.startedAt } };
   } finally {
-    await browser.close();
+    if (browser) await browser.close().catch(() => {});
   }
 }
 
-module.exports = { runAudit, pickRenderSample, detectStack };
+module.exports = { runAudit, Paused, pickRenderSample, detectStack };

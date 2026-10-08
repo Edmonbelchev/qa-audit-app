@@ -83,6 +83,7 @@ form.addEventListener('submit', async (e) => {
 });
 
 function verdictPill(a) {
+  if (a.stalled) return '<span class="verdict v-error" title="The next step did not start. Resume continues from the last checkpoint.">STALLED</span>';
   if (a.status === 'running' || a.status === 'queued') return `<span class="verdict v-run">${a.status === 'queued' ? 'QUEUED' : 'RUNNING'}</span>`;
   if (a.status === 'error') return '<span class="verdict v-error">FAILED</span>';
   const v = (a.summary && a.summary.verdict) || '';
@@ -111,7 +112,7 @@ let openShare = null; // audit id whose share panel is open (pauses history re-r
 
 async function refresh() {
   const list = await api('/api/audits').catch(() => []);
-  const active = list.find((a) => a.status === 'running') || list.find((a) => a.status === 'queued');
+  const active = list.find((a) => a.status === 'running' && !a.stalled) || list.find((a) => a.status === 'queued');
   if (active) { const d = await api('/api/audits/' + active.id).catch(() => null); renderLive(d); } else renderLive(null);
   $('#count').textContent = list.length ? `${list.length} saved` : '';
   $('#empty').hidden = list.length > 0;
@@ -121,7 +122,7 @@ async function refresh() {
     return `<li class="h-item" data-id="${a.id}"><div><div class="h-site">${esc(a.siteName || a.site)}</div><div class="h-meta">${esc(a.site)} · ${esc(a.environment)} · ${when(a.createdAt)}${a.summary ? ` · ${a.summary.pages} URLs · ${Math.round(a.summary.durationMs / 60000) || '<1'} min` : ''}${a.error ? ` · ${esc(a.error)}` : ''}</div></div>
       <div style="display:grid;gap:6px;justify-items:end">${verdictPill(a)}${done ? counts(a) : ''}</div>
       <div class="h-links">${done ? `<button type="button" class="share-btn" data-share="${a.id}" aria-expanded="false">Share${a.shareCount ? ` · ${a.shareCount}` : ''}</button><a href="${base}report.html" target="_blank" rel="noopener">Open report</a><a href="${base}report.html?download">Download HTML</a><a href="${base}asana-tickets.md?download">Asana tickets (.md)</a><a href="${base}qa-results.json?download">Results (.json)</a><a href="${base}artifact.html" target="_blank" rel="noopener" title="The report without page wrapper, ready to publish as a claude.ai artifact">Artifact source</a>` : ''}
-      <button type="button" class="ghost" data-rerun="${a.id}">Run again</button>${a.status !== 'running' ? `<button type="button" class="ghost danger" data-del="${a.id}">Delete</button>` : ''}</div>
+      ${a.stalled ? `<button type="button" class="share-btn" data-resume="${a.id}">Resume</button>` : ''}<button type="button" class="ghost" data-rerun="${a.id}">Run again</button>${a.status !== 'running' || a.stalled ? `<button type="button" class="ghost danger" data-del="${a.id}">Delete</button>` : ''}</div>
       <div class="share" id="share-${a.id}" hidden></div></li>`;
   }).join('');
   clearTimeout(refresh.t);
@@ -174,6 +175,8 @@ $('#history').addEventListener('click', async (e) => {
   const cr = e.target.closest('[data-create]');
   const cp = e.target.closest('[data-copy]');
   const rv = e.target.closest('[data-revoke]');
+  const rs = e.target.closest('[data-resume]');
+  if (rs) { rs.disabled = true; await api(`/api/audits/${rs.dataset.resume}/resume`, { method: 'POST' }).catch((err) => showErr(err.message)); return refresh(); }
   if (sh) return openSharePanel(sh.dataset.share);
   if (cr) {
     const id = cr.dataset.create;
