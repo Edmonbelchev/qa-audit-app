@@ -82,25 +82,14 @@ function startServer(env) {
   check((await fetch(`${base}/s/${withFiles.json.token}`)).status === 410, 'expired link returns 410');
   check((await fetch(`${base}/s/AAAAAAAAAAAAAAAAAAAAAAAA`)).status === 404, 'unknown token returns 404');
   check((await fetch(`${base}/s/../../data/profiles.json`)).status !== 200, 'no traversal via share path');
-  srv.kill();
 
-  // ── Exposed without password: admin locked, shares still work
-  srv = await startServer({ PORT: '4318', QA_DATA_DIR: data, HOST: '0.0.0.0' });
-  check((await fetch(`${base}/api/audits`)).status === 503, 'exposed + no password → admin locked');
+  // ── Deleting the audit kills its links
   const fresh = JSON.parse(fs.readFileSync(path.join(data, 'audits', created.id, 'meta.json'), 'utf8'));
   check(fresh.shares.length === 2, 'share tokens recorded on audit');
-  srv.kill();
-
-  // ── Password protection
-  srv = await startServer({ PORT: '4318', QA_DATA_DIR: data, HOST: '0.0.0.0', QA_ADMIN_PASSWORD: 's3cret' });
-  check((await fetch(`${base}/api/audits`)).status === 401, 'admin requires login');
-  const auth = { authorization: 'Basic ' + Buffer.from('admin:s3cret').toString('base64') };
-  check((await fetch(`${base}/api/audits`, { headers: auth })).status === 200, 'admin login works');
-  const viaLogin = await fetch(`${base}/api/audits/${created.id}/shares`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: '{"days":30}' }).then((r) => r.json());
-  check((await fetch(`${base}/s/${viaLogin.token}`)).status === 200, 'share link works without login');
-  // deleting the audit kills its links
-  await fetch(`${base}/api/audits/${created.id}`, { method: 'DELETE', headers: auth });
-  check((await fetch(`${base}/s/${viaLogin.token}`)).status === 404, 'deleting audit removes its links');
+  const last = (await j(`/api/audits/${created.id}/shares`, { method: 'POST', body: { days: 30 } })).json;
+  check((await fetch(`${base}/s/${last.token}`)).status === 200, 'share link opens');
+  await j('/api/audits/' + created.id, { method: 'DELETE' });
+  check((await fetch(`${base}/s/${last.token}`)).status === 404, 'deleting audit removes its links');
   srv.kill();
   fixture.close();
   console.log(fail ? `\n${fail} failed` : '\nAll sharing tests passed');

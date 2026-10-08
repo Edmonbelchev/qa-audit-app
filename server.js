@@ -15,21 +15,6 @@ const ON_VERCEL = !!process.env.VERCEL;
 const HOST = process.env.HOST || (ON_VERCEL ? '0.0.0.0' : '127.0.0.1');
 const store = createStorage(process.env, { root: ON_VERCEL ? path.join('/tmp', 'qa-audit-data') : path.join(__dirname, 'data') });
 
-// ───────────── Admin protection
-// Share links (/s/…) are public. Everything else needs the admin login once the app is reachable by others.
-const ADMIN_USER = process.env.QA_ADMIN_USER || 'admin';
-const ADMIN_PASSWORD = process.env.QA_ADMIN_PASSWORD || '';
-const EXPOSED = ON_VERCEL || !/^(127\.0\.0\.1|localhost|::1)$/.test(HOST);
-const ALLOW_OPEN = process.env.QA_ALLOW_OPEN === '1';
-const safeEq = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && crypto.timingSafeEqual(x, y); };
-function authorized(req) {
-  if (!ADMIN_PASSWORD) return !EXPOSED || ALLOW_OPEN;
-  const h = req.headers.authorization || '';
-  if (!h.startsWith('Basic ')) return false;
-  const [u, ...rest] = Buffer.from(h.slice(6), 'base64').toString('utf8').split(':');
-  return safeEq(u, ADMIN_USER) && safeEq(rest.join(':'), ADMIN_PASSWORD);
-}
-
 // ───────────── Jobs
 const jobs = new Map(); // id -> live state (this instance only; progress is also persisted to storage)
 const queue = [];
@@ -146,15 +131,9 @@ async function handle(req, res) {
       return send(res, 200, buf, TYPES[file.split('.').pop()], { ...SHARE_HEADERS, ...extra });
     }
 
-    // ── Everything else is admin
-    if (!authorized(req)) {
-      if (EXPOSED && !ADMIN_PASSWORD && !ALLOW_OPEN) return send(res, 503, sharePage('Set an admin password', 'This app is reachable from the internet. Set the QA_ADMIN_PASSWORD environment variable (and optionally QA_ADMIN_USER), then reload. Share links keep working without it.'), TYPES.html);
-      return send(res, 401, sharePage('Sign in required', 'Use the admin username and password for this QA Audit app.'), TYPES.html, { 'www-authenticate': 'Basic realm="QA Audit", charset="UTF-8"' });
-    }
-
     if (req.method === 'GET' && STATIC[p]) { const f = STATIC[p]; return send(res, 200, fs.readFileSync(path.join(__dirname, 'public', f)), TYPES[f.split('.').pop()]); }
 
-    if (p === '/api/info' && req.method === 'GET') return send(res, 200, { storage: store.kind, durable: !(ON_VERCEL && store.kind === 'local disk'), publicUrl: process.env.PUBLIC_URL || null, exposed: EXPOSED, protected: !!ADMIN_PASSWORD });
+    if (p === '/api/info' && req.method === 'GET') return send(res, 200, { storage: store.kind, durable: !(ON_VERCEL && store.kind === 'local disk'), publicUrl: process.env.PUBLIC_URL || null });
 
     if (p === '/api/profiles' && req.method === 'GET') {
       let all = await store.readJSON('profiles.json');
@@ -242,6 +221,5 @@ module.exports.server = server;
 module.exports.store = store;
 
 if (require.main === module) {
-  if (EXPOSED && !ADMIN_PASSWORD && !ALLOW_OPEN) console.warn('⚠ HOST is not localhost and QA_ADMIN_PASSWORD is not set: the admin UI is locked. Set QA_ADMIN_PASSWORD (or QA_ALLOW_OPEN=1 on a trusted network).');
   recover().catch(() => {}).finally(() => server.listen(PORT, HOST, () => console.log(`QA Audit running at http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}  ·  storage: ${store.kind}`)));
 }
